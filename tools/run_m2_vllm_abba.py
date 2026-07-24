@@ -854,7 +854,7 @@ def build_llm_kwargs(model: Path, kv_transfer_config: Any) -> dict[str, Any]:
         "max_num_batched_tokens": 64,
         "gpu_memory_utilization": 0.82,
         "disable_hybrid_kv_cache_manager": True,
-        "enable_chunked_prefill": False,
+        "enable_chunked_prefill": True,
         "async_scheduling": False,
         "scheduling_policy": "fcfs",
         "seed": FROZEN_SEED,
@@ -1691,6 +1691,10 @@ def _validate_engine_config(llm: Any) -> int:
         config.parallel_config.pipeline_parallel_size == 1,
         "pipeline parallelism drifted",
     )
+    require(
+        config.scheduler_config.enable_chunked_prefill is True,
+        "chunked-prefill configuration drifted",
+    )
     attention = config.attention_config
     require(
         attention.backend is not None and attention.backend.name == "FLASH_ATTN",
@@ -2304,7 +2308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=False)
     shutil.copyfile(PROTOCOL_SOURCE, output_dir / "protocol.md")
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda_device)
-    os.environ.setdefault("VLLM_USE_V1", "1")
+    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")

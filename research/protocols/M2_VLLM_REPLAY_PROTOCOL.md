@@ -65,6 +65,7 @@ is absent.
 | vLLM KV block size | 16 tokens |
 | Prompt | fixed token IDs `1000..1016` (17 tokens) |
 | Decode | one greedy token, fixed seed, EOS ignored |
+| Chunked prefill | enabled; the 17-token prompt fits one 64-token scheduler chunk |
 | Numerical observation | complete vocabulary, `raw_logits`, `max_logprobs=-1` |
 | Dtype | BF16 |
 | Attention | `FLASH_ATTN`, FlashAttention version 2 |

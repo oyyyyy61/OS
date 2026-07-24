@@ -429,6 +429,7 @@ def test_llm_kwargs_forbid_convenience_offload_size() -> None:
     kwargs = build_llm_kwargs(Path("/model"), sentinel)
     assert kwargs["kv_transfer_config"] is sentinel
     assert kwargs["block_size"] == 16
+    assert kwargs["enable_chunked_prefill"] is True
     assert kwargs["max_logprobs"] == -1
     assert kwargs["logprobs_mode"] == "raw_logits"
     assert kwargs["attention_config"] == {
