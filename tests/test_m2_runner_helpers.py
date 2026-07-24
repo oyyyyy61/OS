@@ -17,6 +17,7 @@ from tools.run_m2_vllm_abba import (
     TOLERANCE_DERIVATION,
     TOLERANCE_SCHEMA,
     M2ValidationError,
+    _transfer_params,
     build_llm_kwargs,
     compare_logit_vectors,
     dense_logits_from_logprobs,
@@ -435,3 +436,17 @@ def test_llm_kwargs_forbid_convenience_offload_size() -> None:
         "flash_attn_version": 2,
     }
     assert "kv_offloading_size" not in kwargs
+
+
+def test_a1_g_control_shares_lifecycle_phase_with_distinct_trace() -> None:
+    params = _transfer_params(
+        run_id="run",
+        phase="A1_G",
+        trace_id="run:G:measurement",
+        native_trace=Path("/tmp/native.jsonl"),
+        role="measurement",
+    )
+
+    assert params["offload_phase"] == "A1_G"
+    assert params["offload_trace_id"] == "run:G:measurement"
+    assert params["max_offload_tokens"] == 0

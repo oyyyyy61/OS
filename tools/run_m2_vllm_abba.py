@@ -952,13 +952,14 @@ def _measure(
     phase: str,
     native_trace: Path,
     expected_cached_tokens: int,
+    lifecycle_phase: str | None = None,
 ) -> Measurement:
     trace_id = f"{run_id}:{phase}:measurement"
     params = _sampling_params(
         SamplingParams,
         _transfer_params(
             run_id=run_id,
-            phase=phase,
+            phase=lifecycle_phase or phase,
             trace_id=trace_id,
             native_trace=native_trace,
             role="measurement",
@@ -1895,6 +1896,7 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
             phase="A1",
             native_trace=native_trace,
             expected_cached_tokens=0,
+            lifecycle_phase="A1_G",
         )
         g = _measure(
             llm=llm,
@@ -1906,6 +1908,7 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
             phase="G",
             native_trace=native_trace,
             expected_cached_tokens=EXPECTED_EXTERNAL_TOKENS,
+            lifecycle_phase="A1_G",
         )
         b1, b1_prefetch, b1_producer_id, b1_producer_trace = _produce_and_replay(
             llm=llm,

@@ -88,10 +88,12 @@ complete successfully.
 
 1. **A1 cold:** reset GPU and connector; run the measured request with
    `max_offload_tokens=0`; require zero cached prompt tokens.
-2. **G no-DMA prefix hit:** leave the GPU prefix created by A1 in place and
-   immediately repeat the measured request with offload disabled; require
-   exactly 16 GPU-hit tokens, zero CPU-load tokens, and no D2H/H2D event under
-   the G trace ID.
+2. **G no-DMA prefix hit:** A1 and G use one explicit `A1_G` lifecycle phase
+   because G consumes A1's live GPU allocation. Leave the GPU prefix created
+   by A1 in place and immediately repeat the measured request with offload
+   disabled; keep distinct A1/G trace IDs and result labels, and require exactly
+   16 GPU-hit tokens, zero CPU-load tokens, and no D2H/H2D event under the G
+   trace ID.
 3. **B1 replay:** reset GPU and connector; run a new producer with
    `max_offload_tokens=16` and `evict_after_store_complete=true`; require one
    completed D2H job; reset GPU only; call the explicit prefetch API; require a
