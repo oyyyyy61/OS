@@ -15,16 +15,37 @@ The project is intentionally independent:
 
 ## Current gate
 
-M1 is imported as scoped evidence. M2 is active. M2 requires a single-process,
-GPU plus CPU-DRAM lifecycle loop with shared-owner isolation, idempotent
-release, generation safety, transfer integrity, no use-after-free, and output
-correctness. Performance mechanisms remain out of scope until M2 passes.
+M1 is imported as scoped evidence. M2 is active under the v2 evidence protocol.
+M2 requires a single-process GPU plus CPU-DRAM lifecycle loop with shared-owner
+isolation, idempotent release, generation safety, transfer integrity, no
+use-after-free, and output correctness. Performance mechanisms remain out of
+scope until M2 passes.
 
 The clean runtime now contains the canonical schema, transactional lifecycle
 ledger, DAG node gate, generation-safe transfer reservations, shared-owner
 orchestrator, and conservation auditor. These are component results for M2
-items 1-7. The real vLLM GPU token/logit replay and immutable M2 evidence pack
-remain open, so M2 has not passed.
+items 1-7. The successful `m2_vllm_abba_calibration_20260725_run03` execution
+is retained only as a pilot: it established exact canonical DMA digests, equal
+greedy tokens, exact A1/A2 and B1/B2 repeats, and an observed BF16 cold/replay
+maximum absolute logit difference of `0.109375`. It is excluded from every v2
+calibration and formal cohort and closes no M2 gate.
+
+The v2 item-8 gate adds a no-DMA GPU prefix-hit control (`G`) to separate
+prefix-path numerics from transfer effects. It then requires 59 fresh-process
+calibration runs under the preregistered cap `atol=0.125, rtol=0`, a frozen
+aggregate calibration manifest and tolerance file, and 20 new fresh-process
+formal holdouts. One formal run can record only one holdout pass. Item 8 closes
+only after the complete 20-run holdout set passes a closed-set audit and is
+referenced by an aggregate acceptance manifest. Exact source, binary, model,
+environment, command, and raw-evidence provenance is fail-closed throughout.
+M2 therefore remains open.
+
+This correctness work remains substrate for the narrowed research mainline:
+dependence-aware shared leases (C1), an explicitly constrained joint
+controller (C2), and deadline-aware partial-prefix single-flight (C3).
+Tokencake, Continuum, and PBKV already occupy generic DAG-aware offload,
+predictive upload, TTL retention, shared-node future-access scoring, and
+conservative prefetch.
 
 ## Development
 
@@ -36,7 +57,8 @@ uv sync --frozen
 ```
 
 See `research/ARCHITECTURE.md`, `research/M2_RUNTIME_CONTRACT.md`,
-`research/STAGE_GATES.md`, `research/REFERENCES.md`, and
+`research/STAGE_GATES.md`, `research/protocols/M2_VLLM_REPLAY_PROTOCOL.md`,
+`research/REFERENCES.md`, and
 `evidence/IMPORT_MANIFEST.json` for the normative boundaries and first-order
 prior-work constraints.
 

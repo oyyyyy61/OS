@@ -22,6 +22,12 @@ from dagkv.domain import (
     WorkflowSpec,
     WorkflowStatus,
 )
+from dagkv.engine_adapter import (
+    DMATerminalObservation,
+    EngineFingerprint,
+    PhysicalEndpoint,
+    commit_transfer_observation,
+)
 from dagkv.orchestrator import LifecycleOrchestrator
 
 __all__ = [
@@ -31,11 +37,14 @@ __all__ = [
     "BindingState",
     "BlockKey",
     "DAGKVError",
+    "DMATerminalObservation",
+    "EngineFingerprint",
     "ExecutionRef",
     "IdentityError",
     "LeaseState",
     "LifecycleOrchestrator",
     "NodeStatus",
+    "PhysicalEndpoint",
     "ReplicaId",
     "ResidencyState",
     "StateTransitionError",
@@ -46,4 +55,5 @@ __all__ = [
     "WorkflowNode",
     "WorkflowSpec",
     "WorkflowStatus",
+    "commit_transfer_observation",
 ]
