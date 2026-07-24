@@ -1,0 +1,22 @@
+{
+  "schema_version": "dagkv.m2.calibration_launch_marker.v1",
+  "recorded_at_utc": "2026-07-24T21:31:34Z",
+  "campaign_id": "m2-calibration-ea1c284bafca402fbc594f6f8bad3014",
+  "campaign_root": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v2_calibration_20260725_campaign01",
+  "campaign_preregistration_file": "CAMPAIGN_PREREGISTRATION.json",
+  "campaign_preregistration_sha256": "08bd0b64df05162927f1a14243089b8dbe4d910641432e40551b3c6d5d207915",
+  "dagkv_head_before_marker": "483d74b73adb8e3d9ced4e9de5fdf47b12f4a54a",
+  "protocol_schema": "dagkv.m2.vllm_abba.v2",
+  "protocol_sha256": "3fbaf586f692059c40feba7ca27386148f0f10674c45d9a7cbe48c41a225cc42",
+  "implementation_manifest_sha256": "6b3377bca003b0d78f638776fd28faa0f94e60c5749c344ff889e2e474c373bc",
+  "reproducibility_fingerprint": "29a746cfa88d5ec0fc05863d629a10a4745cf91c7723697802191781136760f6",
+  "selection_rule": {
+    "expected_runs": 59,
+    "ordered_run_names": "run-001..run-059",
+    "attempts_per_run": 1,
+    "retry_count": 0,
+    "stop_on_first_failure": true
+  },
+  "excluded_pilots_through": "m2_vllm_abba_v2_pilot_20260725_run08",
+  "claim_scope": "M2 calibration launch only; no formal holdout, item-8 acceptance, C1, C2, C3, or performance claim"
+}
