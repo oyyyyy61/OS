@@ -1,0 +1,109 @@
+{
+  "schema_version": "dagkv_evidence_import_v1",
+  "imported_at": "2026-07-24T20:04:22+08:00",
+  "source_acceptance_created_at": "2026-07-24T18:10:58+08:00",
+  "source_project": {
+    "path": "/home/data/25_oyzx/cagent-work/offload",
+    "role": "historical prototype and M0/M1 evidence source",
+    "runtime_dependency_allowed": false
+  },
+  "runtime_boundary": {
+    "implementation_files_imported": [],
+    "forbidden_runtime_import_prefixes": [
+      "offload",
+      "Agentrix",
+      "vllm"
+    ],
+    "canonical_schema_path": "src/dagkv/domain.py"
+  },
+  "relocation": {
+    "frozen_documents_are_byte_immutable": true,
+    "historical_relative_paths_may_not_resolve_after_relocation": true,
+    "paper_source_resolver": "../research/REFERENCES.md",
+    "large_payload_policy": "external checksum inventories only until stable artifact publication"
+  },
+  "m1_authority": {
+    "source_path": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_acceptance_20260724",
+    "source_sha256sums_sha256": "349443b4c134dc2d745f8a898065e69f7dcdc1c1bcd2f7cb10432db2b7f0c2fe",
+    "source_manifest_sha256": "e50c89ad358bca7db755a1ad8a13041f505959d784c5a637af998feddf33cdc8",
+    "decision": "m1_pass_for_declared_scope",
+    "copied_manifest": {
+      "path": "m1/ACCEPTANCE_MANIFEST.json",
+      "sha256": "e50c89ad358bca7db755a1ad8a13041f505959d784c5a637af998feddf33cdc8"
+    }
+  },
+  "repository_acceptance_copy": {
+    "path": "m1/acceptance",
+    "role": "small self-verifying copy of the complete M1 decision package",
+    "source_path": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_acceptance_20260724",
+    "sha256sums_sha256": "349443b4c134dc2d745f8a898065e69f7dcdc1c1bcd2f7cb10432db2b7f0c2fe",
+    "manifest_sha256": "e50c89ad358bca7db755a1ad8a13041f505959d784c5a637af998feddf33cdc8",
+    "manifest_sha256_file_sha256": "aa7e4b4346379b856a46f0dd8f1046c28a52b6f59165da470b2e157e186b90a3",
+    "payload_files": 9,
+    "read_only": true
+  },
+  "external_root_inventories": [
+    {
+      "name": "m1_lifecycle_v2_acceptance_20260723_215312",
+      "local_payload_root": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_lifecycle_v2_acceptance_20260723_215312",
+      "sha256sums": {
+        "path": "m1/external_roots/lifecycle/SHA256SUMS",
+        "sha256": "bc48cf42daa9c55ebfa76ec55bb81a5e72e6f82f91aee1500125e6743897453d"
+      },
+      "manifest_sha256_file": {
+        "path": "m1/external_roots/lifecycle/MANIFEST.sha256",
+        "sha256": "6fe418d0844f8fa3bc3e365465c9d0a69958b1d0f9bd7074e6cac606e9611960"
+      }
+    },
+    {
+      "name": "m1_measurement_control_abba_12seed_rawindex_v2_20260723",
+      "local_payload_root": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_measurement_control_abba_12seed_rawindex_v2_20260723",
+      "sha256sums": {
+        "path": "m1/external_roots/control_abba/SHA256SUMS",
+        "sha256": "feaca3dc974afbdba95c7007cbacb21501868528b614f8fa1517e7f5f64bf1d2"
+      },
+      "manifest_sha256_file": {
+        "path": "m1/external_roots/control_abba/MANIFEST.sha256",
+        "sha256": "c3101e4e22376a6623774227127ba538682250ec63219ad7d45eb7137b460537"
+      }
+    },
+    {
+      "name": "m1_lifecycle_v2_20260724_001249",
+      "local_payload_root": "/home/data/25_oyzx/cagent-work/offload/experiments/source_freezes/m1_lifecycle_v2_20260724_001249",
+      "sha256sums": {
+        "path": "m1/external_roots/source_freeze/SHA256SUMS",
+        "sha256": "b2937a6c6e9164f3b82aa9078d8584ba12b5a96a81c44aca9f4738e4093f3166"
+      },
+      "manifest_sha256_file": {
+        "path": "m1/external_roots/source_freeze/MANIFEST.sha256",
+        "sha256": "21fe09ef557c10ff5fda55cd292398e1c0abaf6d5441803dd771378eb6f18ce9"
+      }
+    }
+  ],
+  "copied_artifacts": [
+    {
+      "path": "../research/imported/M1_RESEARCH_CONTRACT.md",
+      "sha256": "8b64a36f859d1ed223f78907e887f9e3cd49b86ac1fe258565621e452f7cde14"
+    },
+    {
+      "path": "../research/imported/M1_CANONICAL_LEDGER_SPEC.md",
+      "sha256": "428b76aa6c62bdc78afe82c0dc8c45044a555b7cad77ab3ef13dd58a134d1c09"
+    },
+    {
+      "path": "../research/imported/RELATED_WORK_MATRIX.md",
+      "sha256": "31e6ed5e6f615093bd717f40418aeb8e2609bbabe7eb34ff09908df954655e51"
+    },
+    {
+      "path": "m1/SOURCE_FREEZE_MANIFEST.json",
+      "sha256": "ed9ce0383ce1ae29616ca1eca312757136d9653e93774329a9c5ef8f135c6dfb"
+    },
+    {
+      "path": "m1/LIFECYCLE_MANIFEST.json",
+      "sha256": "ed326b1a4d1394698afe28f15ac91937660b7b85cfbacdcb9ee711fcade7c867"
+    },
+    {
+      "path": "m1/CONTROL_ABBA_MANIFEST.json",
+      "sha256": "230abc0d4f4a5213a7f353ffe49576fabc0b54201962be1e362cf5ad218c6ce2"
+    }
+  ]
+}

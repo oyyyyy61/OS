@@ -1,0 +1,193 @@
+{
+  "schema_version": "m1_lifecycle_v2_acceptance_manifest_v1",
+  "created_at": "2026-07-23T22:35:11+08:00",
+  "status": "accepted",
+  "scope": "canonical_lifecycle_conservation_and_action_coverage",
+  "performance_evidence_accepted": false,
+  "overwrite_policy": "directory_created_only_when_absent; artifacts written once",
+  "auditor": {
+    "module": "offload.benchmarks.measurement.accounting",
+    "source_path": "/home/data/25_oyzx/cagent-work/offload/benchmarks/measurement/accounting.py",
+    "sha256": "6a4677cd89387be905370226a313a0b637ba2aa228638d93a029468037024817",
+    "component_gate_count": 12,
+    "acceptance_predicate": "all component gates true; aggregate passed true; issues.total zero; all live counts zero"
+  },
+  "evidence_hierarchy": {
+    "unit": {
+      "artifact": "validation/vllm_connector_offline_tests.txt",
+      "result": "187 passed, 2 skipped",
+      "role": "producer, connector, reset, tombstone, and deferred-free contracts"
+    },
+    "synthetic": {
+      "artifact": "validation/accounting_synthetic_tests.txt",
+      "result": "36 passed",
+      "role": "auditor gates and constructed counterexamples"
+    },
+    "repository_regression": {
+      "artifact": "validation/offload_tests.txt",
+      "result": "310 passed, 17 warnings"
+    },
+    "live": {
+      "accepted_trace_count": 7,
+      "role": "acceptance authority for runtime lifecycle evidence"
+    }
+  },
+  "accepted_live_evidence": {
+    "resetfix_2113": {
+      "source_result": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_gpu_canonical_dag_qwen3_8b_s1_b2_t256_o1_g128_resetfix_20260723_2113.json",
+      "packaged_result": "results/m1_gpu_canonical_dag_qwen3_8b_s1_b2_t256_o1_g128_resetfix_20260723_2113.json",
+      "result_sha256": "23213421befe7055dfa8d84b54c4e41ecfad8aa626d78603932534966007713d",
+      "accepted_phase_count": 6,
+      "aggregate_observed_actions": [
+        "allocate",
+        "bind",
+        "evict",
+        "lease",
+        "load",
+        "map",
+        "release",
+        "save",
+        "unmap"
+      ],
+      "canonical_prefetch_observed": false,
+      "performance_evidence_accepted": false,
+      "performance_exclusion": "pressure_audit.valid_pressure is false",
+      "traces": [
+        {
+          "phase": "baseline_vllm",
+          "source": "traces/baseline_vllm_1784812410950202178.jsonl",
+          "original_source": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/baseline_vllm_1784812410950202178.jsonl",
+          "sha256": "2ed3c67a499e2e9b0e789f000bb9150bdfc5e423cc4f1dc6b5d9ff8f98965b23",
+          "audit": "audits/resetfix_baseline_vllm.audit.json",
+          "canonical_rows": 1666,
+          "source_rows": 1670,
+          "required_actions": ["allocate", "bind", "evict", "lease", "map", "release", "unmap"]
+        },
+        {
+          "phase": "shared_prefix_only",
+          "source": "traces/shared_prefix_only_1784812411384240616.jsonl",
+          "original_source": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/shared_prefix_only_1784812411384240616.jsonl",
+          "sha256": "cce6c5685335388fd940304b1a3d20a4ed78ca1b01463f6d31a8bd6224b6ae77",
+          "audit": "audits/resetfix_shared_prefix_only.audit.json",
+          "canonical_rows": 1466,
+          "source_rows": 1470,
+          "required_actions": ["allocate", "bind", "evict", "lease", "map", "release", "unmap"]
+        },
+        {
+          "phase": "cpu_dram_offloading_baseline",
+          "source": "traces/cpu_dram_offloading_baseline_1784812411751332466.jsonl",
+          "original_source": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/cpu_dram_offloading_baseline_1784812411751332466.jsonl",
+          "sha256": "dd016a6e3811e12ee0c2706f341f55ed9514d7c7e60b66ac8e1a4e28c5acf239",
+          "audit": "audits/resetfix_cpu_dram_offloading_baseline.audit.json",
+          "canonical_rows": 1750,
+          "source_rows": 1767,
+          "required_actions": ["allocate", "bind", "evict", "load", "map", "release", "save", "unmap"]
+        },
+        {
+          "phase": "ttl_only_policy",
+          "source": "traces/ttl_only_policy_1784812412114540503.jsonl",
+          "original_source": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/ttl_only_policy_1784812412114540503.jsonl",
+          "sha256": "db8886e0314147a8c9b6845cd3e842d863f180c0aa0a0d68e02cddd4adc71b68",
+          "audit": "audits/resetfix_ttl_only_policy.audit.json",
+          "canonical_rows": 1570,
+          "source_rows": 1574,
+          "required_actions": ["allocate", "bind", "evict", "lease", "map", "release", "unmap"]
+        },
+        {
+          "phase": "cpu_offload_preload_policy",
+          "source": "traces/cpu_offload_preload_policy_1784812412475407047.jsonl",
+          "original_source": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/cpu_offload_preload_policy_1784812412475407047.jsonl",
+          "sha256": "a832e61fced9990dae4580be11dffc12115146f7c54fe11af6e2f871319ca531",
+          "audit": "audits/resetfix_cpu_offload_preload_policy.audit.json",
+          "canonical_rows": 1740,
+          "source_rows": 1748,
+          "required_actions": ["allocate", "bind", "evict", "lease", "map", "release", "save", "unmap"]
+        },
+        {
+          "phase": "cpu_offload_background_prefetch_policy",
+          "source": "traces/cpu_offload_background_prefetch_policy_1784812412903388923.jsonl",
+          "original_source": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/cpu_offload_background_prefetch_policy_1784812412903388923.jsonl",
+          "sha256": "cedac07add021a698582dce594aba605fc31b79524b7360f93a23e0057bf508b",
+          "audit": "audits/resetfix_cpu_offload_background_prefetch_policy.audit.json",
+          "canonical_rows": 1740,
+          "source_rows": 1751,
+          "required_actions": ["allocate", "bind", "evict", "lease", "map", "release", "save", "unmap"]
+        }
+      ]
+    },
+    "prefetchcov4_action_coverage": {
+      "source_result": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_gpu_canonical_dag_qwen3_8b_s1_b2_t256_o1_g128_prefetchcov4_20260723_215312.json",
+      "packaged_result": "results/m1_gpu_canonical_dag_qwen3_8b_s1_b2_t256_o1_g128_prefetchcov4_20260723_215312.json",
+      "result_sha256": "1816b355af23311dddb4bcd71823966c70264b6e238d08d67e07d694f46ca38f",
+      "accepted_phase": "cpu_dram_prefetch_coverage",
+      "evidence_scope": "lifecycle_action_coverage_only",
+      "performance_claim_eligible": false,
+      "source": "traces/cpu_dram_prefetch_coverage_1784814836502232042.jsonl",
+      "original_source": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/cpu_dram_prefetch_coverage_1784814836502232042.jsonl",
+      "sha256": "6dd17876b1b42f98d903068ad86b802944cfcf4ca7bad85e9f58e491ea2d55b3",
+      "audit": "audits/prefetchcov4_cpu_dram_prefetch_coverage.audit.json",
+      "canonical_rows": 1898,
+      "source_rows": 1922,
+      "required_actions": [
+        "allocate",
+        "bind",
+        "evict",
+        "lease",
+        "load",
+        "map",
+        "prefetch",
+        "release",
+        "save",
+        "unmap"
+      ],
+      "scheduler_prefetch_started": 3,
+      "scheduler_prefetch_completed": 3,
+      "scheduler_prefetch_loaded_tokens": 720
+    }
+  },
+  "live_gate_summary": {
+    "trace_count": 7,
+    "all_component_gates_true": true,
+    "all_aggregate_passed_true": true,
+    "total_issues": 0,
+    "physical_live": 0,
+    "mapping_live": 0,
+    "binding_live": 0,
+    "lease_live": 0,
+    "transfer_inflight": 0
+  },
+  "performance_exclusion": {
+    "valid_pressure": false,
+    "valid_background_prefetch": false,
+    "valid_background_wall_overlap": false,
+    "cpu_offload_load_missing": true,
+    "background_prefetch_missing": true,
+    "background_scheduler_prefetch_missing": true,
+    "main_background_prefetch_outcome_counts": {"no_external_kv_hit": 3}
+  },
+  "excluded_attempts": [
+    {
+      "path": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/baseline_vllm_1784809983355381112.jsonl",
+      "reason": "64-block override left 63 allocatable blocks after the reserved null block; request required 64"
+    },
+    {
+      "path": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_gpu_canonical_dag_qwen3_8b_s1_b2_t256_o1_g128_run_20260723_2042.json",
+      "trace": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/cpu_dram_offloading_baseline_1784810719183552425.jsonl",
+      "reason": "two physical_evict_before_transfer_terminal issues at canonical rows 1746 and 1749"
+    },
+    {
+      "path": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_gpu_canonical_dag_qwen3_8b_s1_b2_t256_o1_g128_prefetchcov_20260723_212405.json",
+      "reason": "prefetchcov1 has six main phases only; coverage phase absent; three no_external_kv_hit outcomes"
+    },
+    {
+      "path": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_gpu_canonical_dag_qwen3_8b_s1_b2_t256_o1_g128_prefetchcov2_20260723_213611.json",
+      "trace": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/cpu_dram_prefetch_coverage_1784813813368335302.jsonl",
+      "reason": "runtime completed three prefetches but canonical ledger classified them as load; required prefetch action missing"
+    },
+    {
+      "path": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_gpu_canonical_dag_qwen3_8b_s1_b2_t256_o1_g128_prefetchcov3_20260723_214754.json",
+      "trace": "/home/data/25_oyzx/cagent-work/offload/experiments/results/native_offload_traces/cpu_dram_prefetch_coverage_1784814509663945707.jsonl",
+      "reason": "ten-action audit passes, but lifecycle-only evidence scope and performance ineligibility tags are absent"
+    }
+  ]
+}

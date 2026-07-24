@@ -1,0 +1,134 @@
+{
+  "schema_version": "m1_scoped_acceptance_manifest_v1",
+  "created_at": "2026-07-24T18:10:58+08:00",
+  "status": "accepted_scoped",
+  "stage_decision": {
+    "m0": "pass_with_integrity_caveat",
+    "m1": "pass_for_declared_scope",
+    "m2": "open_for_canonical_runtime_correctness",
+    "performance_tuning": "closed_until_m2_and_ordered_m3_gates"
+  },
+  "declared_scope": {
+    "processes": 1,
+    "gpus": 1,
+    "gpu_model": "NVIDIA GeForce RTX 4090",
+    "tiers": [
+      "GPU",
+      "primary CPU-DRAM"
+    ],
+    "accepted_claims": [
+      "canonical lifecycle conservation",
+      "measurement-control protocol execution",
+      "repeated-control precision",
+      "scoped source and environment reconstruction"
+    ],
+    "excluded_claims": [
+      "adaptive policy benefit",
+      "multi-manager correctness",
+      "secondary filesystem or object tier correctness",
+      "process or file crash recovery",
+      "multi-rank or multi-GPU correctness",
+      "cross-hardware generality"
+    ]
+  },
+  "stage_gates": {
+    "canonical_event_conservation": true,
+    "precomputed_frozen_order": true,
+    "minimum_independent_clusters": 5,
+    "observed_independent_clusters": 12,
+    "control_precision_limit_relative_95ci_half_width": 0.05,
+    "control_a_relative_95ci_half_width": 0.018903652111067114,
+    "control_b_relative_95ci_half_width": 0.010966030504649074,
+    "control_precision_passed": true,
+    "raw_and_source_state_hashed": true,
+    "source_reconstruction_validated": true,
+    "all_m1_gates_passed": true
+  },
+  "evidence": {
+    "lifecycle_acceptance": {
+      "path": "../m1_lifecycle_v2_acceptance_20260723_215312",
+      "status": "accepted",
+      "manifest_sha256": "ed326b1a4d1394698afe28f15ac91937660b7b85cfbacdcb9ee711fcade7c867",
+      "sha256sums_sha256": "bc48cf42daa9c55ebfa76ec55bb81a5e72e6f82f91aee1500125e6743897453d",
+      "live_trace_count": 7,
+      "canonical_action_count": 10,
+      "issues": 0,
+      "all_final_live_counts_zero": true,
+      "performance_claim_eligible": false
+    },
+    "measurement_control_abba": {
+      "path": "../m1_measurement_control_abba_12seed_rawindex_v2_20260723",
+      "status": "accepted",
+      "manifest_sha256": "230abc0d4f4a5213a7f353ffe49576fabc0b54201962be1e362cf5ad218c6ce2",
+      "sha256sums_sha256": "feaca3dc974afbdba95c7007cbacb21501868528b614f8fa1517e7f5f64bf1d2",
+      "report_sha256": "b6d9e2033c4439724f32690cfd109d017a0e12f8a922fbf02b32a7decf74c1d3",
+      "completed_rows": 48,
+      "failed_rows": 0,
+      "journal_events": 96,
+      "independent_clusters": 12,
+      "paired_identical_control_geometric_ratio": 1.0004591870622241,
+      "paired_identical_control_95ci": [
+        0.9928798408694627,
+        1.0080963917050672
+      ],
+      "canonical_rows": 75776,
+      "trace_rows": 76592,
+      "accounting_issues": 0,
+      "all_final_live_counts_zero": true,
+      "payload_bytes_conserved": true,
+      "policy_benefit_claim_eligible": false
+    },
+    "source_environment_freeze": {
+      "path": "../../source_freezes/m1_lifecycle_v2_20260724_001249",
+      "status": "accepted_scoped_reconstruction",
+      "manifest_sha256": "ed9ce0383ce1ae29616ca1eca312757136d9653e93774329a9c5ef8f135c6dfb",
+      "sha256sums_sha256": "b2937a6c6e9164f3b82aa9078d8584ba12b5a96a81c44aca9f4738e4093f3166",
+      "payload_files": 61,
+      "clean_base_patch_checks_passed": true,
+      "deterministic_archive_checks_passed": true,
+      "dependency_exactness_passed": true,
+      "inventory_coverage_passed": true,
+      "read_only_permissions_passed": true
+    }
+  },
+  "test_and_style_evidence": {
+    "full_offload_regression": "323 passed, 14 warnings",
+    "abba_controller": "24 passed",
+    "related_lifecycle_accounting": "64 passed, 1 NVML warning",
+    "scoped_ruff_and_format": "passed",
+    "whole_tree_clean_claim": false,
+    "historical_whole_tree_ruff_diagnostics": 443,
+    "historical_format_open_files": 73
+  },
+  "decision_documents": [
+    {
+      "path": "decision_docs/M1_CANONICAL_LEDGER_SPEC.md",
+      "sha256": "428b76aa6c62bdc78afe82c0dc8c45044a555b7cad77ab3ef13dd58a134d1c09"
+    },
+    {
+      "path": "decision_docs/M1_LIFECYCLE_GAP_AUDIT.md",
+      "sha256": "cd8eeb980d8767f5fa0c33f80db7d24a5f7ac327142e4abaf4fb0538898ac627"
+    },
+    {
+      "path": "decision_docs/RESEARCH_CONTRACT.md",
+      "sha256": "8b64a36f859d1ed223f78907e887f9e3cd49b86ac1fe258565621e452f7cde14"
+    },
+    {
+      "path": "decision_docs/CLAIM_EVIDENCE_LEDGER.md",
+      "sha256": "4a25ceee5517ed81ef308732769ba21f445f10df4f4f5517545acec0990c77ee"
+    },
+    {
+      "path": "decision_docs/REPRO_MANIFEST.md",
+      "sha256": "ed7315c17b4e22915ebfb532e351f6aee8a32c5a6af8f835b4c280fe441096e9"
+    }
+  ],
+  "superseded_failure": {
+    "path": "../m1_measurement_control_abba_12seed_20260723",
+    "status": "superseded_failed_diagnostic",
+    "completed_rows": 36,
+    "scheduled_rows": 48,
+    "reason": "raw JSONL physical-line indices were interpreted as positions after minimum-subtask filtering",
+    "evidence_eligible": false,
+    "replacement": "../m1_measurement_control_abba_12seed_rawindex_v2_20260723"
+  }
+}

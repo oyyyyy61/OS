@@ -1,0 +1,113 @@
+{
+  "schema_version": "m1_lifecycle_v2_source_environment_freeze_v1",
+  "freeze_created_at": "2026-07-24T00:12:49+08:00",
+  "reproducibility_scope": {
+    "claim": "lifecycle-v2 runtime research source and nested Agentrix/vLLM modifications",
+    "excludes": [
+      "main worktree global reconstruction",
+      "historical results payloads",
+      "prior source freezes",
+      "derived caches"
+    ],
+    "limitation": "main status includes 2502 tracked deletions, 2495 under historical vLLM paths; no global parent-worktree untracked payload is included"
+  },
+  "repositories": {
+    "main": {
+      "head": "089b122770af81dbca40b63f23de344902fdb432",
+      "branch": "kv-offloading",
+      "agentrix_gitlink_at_head": "160000 commit c357601ee37ff386958e82546b7caa9113c843e6\tAgentrix",
+      "status_porcelain": "git/main_status_porcelain_v1.txt",
+      "tracked_patch": "git/main_tracked.patch",
+      "tracked_patch_sha256": "06907acd984154f3a739a218115b14dc0f22431140fbdcb494126735a3f96811"
+    },
+    "agentrix": {
+      "head": "7190d7814841aab1fc0eaee1504d1671084d3e8d",
+      "branch": "overlap",
+      "vllm_gitlink_at_head": "160000 commit e139c755bd39cf34ef1f2a4280c68a7c4952dccf\tvllm",
+      "status_porcelain": "git/agentrix_status_porcelain_v1.txt",
+      "tracked_patch": "git/agentrix_tracked.patch",
+      "tracked_patch_sha256": "aa93cb090acbea2f37b94a886645a28f860256493b1673422198f5d687710e38"
+    },
+    "vllm": {
+      "head": "2e5d72fa44e29cdae21023d6cd4de03bdba9bfbd",
+      "branch": "codex/forkattention-offload-adapt",
+      "status_porcelain": "git/vllm_status_porcelain_v1.txt",
+      "tracked_patch": "git/vllm_tracked.patch",
+      "tracked_patch_sha256": "690f0c82ca80dd5d4dbf0acae4f564bebba6382ba737a2eff74e3509131a7bca"
+    }
+  },
+  "payloads": {
+    "runtime_source": {
+      "path": "payloads/offload_runtime_research_source.tar.gz",
+      "sha256": "f3bb51a537d8dc364d722a7e3c88e8d0872379d9613e2ef632c4d290d1a5e0a3",
+      "deterministic": true,
+      "archive_entries": 205
+    },
+    "vllm_untracked_source": {
+      "path": "payloads/vllm_untracked_source.tar.gz",
+      "sha256": "7b8688ab9cec2f131946d59e6ebe94b33ef2277a5cb41b87d821c701e933e883",
+      "archive_entries": 10
+    },
+    "requirements": {
+      "path": "environment/requirements.freeze.txt",
+      "sha256": "16450cc1d680cda638fc14bb814f323114e89391a689aa0f3b086f5e89254328",
+      "command": "/home/data/25_oyzx/Agentrix/vllm/.venv/bin/python -m pip freeze --all"
+    }
+  },
+  "untracked_inventory": {
+    "main_files": 570,
+    "agentrix_files": 1,
+    "vllm_files": 21,
+    "vllm_archived_source_files": 10,
+    "vllm_excluded_result_files": 11,
+    "inventories": [
+      "inventory/main_untracked_inventory.tsv",
+      "inventory/agentrix_untracked_inventory.tsv",
+      "inventory/vllm_untracked_inventory.tsv"
+    ]
+  },
+  "evidence": {
+    "abba_v2": {
+      "external_root": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_measurement_control_abba_12seed_rawindex_v2_20260723",
+      "protocol_sha256": "cdbe5476061b1e8d12bb6d018f203155f36974daa86ab3feb50b1546bf8ca614",
+      "manifest_sha256": "230abc0d4f4a5213a7f353ffe49576fabc0b54201962be1e362cf5ad218c6ce2",
+      "sha256sums_sha256": "feaca3dc974afbdba95c7007cbacb21501868528b614f8fa1517e7f5f64bf1d2",
+      "report_sha256": "b6d9e2033c4439724f32690cfd109d017a0e12f8a922fbf02b32a7decf74c1d3",
+      "status": "accepted_48_of_48",
+      "rows": 48,
+      "independent_clusters": 12,
+      "canonical_audits": 96,
+      "accounting_issues": 0,
+      "policy_benefit_claim_eligible": false
+    },
+    "abba_v1_failed_diagnostic": {
+      "external_root": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_measurement_control_abba_12seed_20260723",
+      "execution_status_sha256": "1b9862be6e4372270f9acf59cdfd9028b4baf6247167441b9a2cf45f7ea180fa",
+      "status": "superseded_failed_diagnostic",
+      "evidence_eligible": false
+    },
+    "lifecycle_acceptance": {
+      "external_root": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_lifecycle_v2_acceptance_20260723_215312",
+      "manifest_sha256": "ed326b1a4d1394698afe28f15ac91937660b7b85cfbacdcb9ee711fcade7c867",
+      "sha256sums_sha256": "bc48cf42daa9c55ebfa76ec55bb81a5e72e6f82f91aee1500125e6743897453d",
+      "status": "accepted"
+    },
+    "retired_schedule": {
+      "external_root": "/home/data/25_oyzx/cagent-work/offload/experiments/results/m1_protocol_audit_20260723",
+      "retirement_sha256": "902951435bc85b7dae0ff0e34c6aecc018c1c1b75148e3801b175c288a36333c",
+      "status": "superseded_non_executable"
+    }
+  },
+  "validation_evidence": {
+    "test_lint_file_sha256": "2efb526a07045f26039e03a7371a842683686ae6b591307a980d7c0071ec3b54",
+    "readme_sha256": "590672ea8756bceba79329d30aa48e812483b9d27382857c329b84884b713e29",
+    "checks": [
+      "gzip",
+      "tar listing",
+      "archive extraction smoke",
+      "git apply --check --reverse",
+      "pip freeze exact diff",
+      "untracked inventory union"
+    ]
+  }
+}

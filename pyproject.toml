@@ -1,0 +1,36 @@
+[build-system]
+requires = ["uv_build>=0.10.11,<0.11.0"]
+build-backend = "uv_build"
+
+[project]
+name = "dagkv"
+version = "0.1.0"
+description = "Lifecycle-safe KV-cache runtime for multi-agent DAG workflows"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "oyyyyy61" }]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/oyyyyy61/OS"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.15.22",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "SIM", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
