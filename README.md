@@ -25,11 +25,14 @@ The clean runtime now contains the canonical schema, transactional lifecycle
 ledger, DAG node gate, generation-safe transfer reservations, shared-owner
 orchestrator, and conservation auditor. These are component results for M2
 items 1-7. `evidence/m2/PILOT_ATTEMPTS.json` records every current real-GPU
-attempt and its resolution. The protocol-freeze v2 pilot (run07) established
+attempt and its resolution. The post-evidence-chain protocol-freeze v2 pilot
+(run08) independently re-established
 exact canonical DMA digests, equal greedy tokens, exact A1/A2 repeats, exact
 `G=B1=B2` logits, and a BF16 cold/prefix maximum absolute logit difference of
-`0.109375`. This localizes that numerical difference to the cold-prefill versus
-GPU-prefix execution path; the observed DMA path added no logit difference.
+`0.109375`. Independent raw replay reproduced every token, margin, comparison,
+DMA identity, byte count, digest, and source/runtime binding. This localizes
+that numerical difference to the cold-prefill versus GPU-prefix execution
+path; the observed DMA path added no logit difference.
 Every indexed run remains excluded from calibration and formal cohorts and
 closes no M2 gate.
 
