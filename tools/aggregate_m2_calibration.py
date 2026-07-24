@@ -15,11 +15,35 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v2"
-CALIBRATION_COHORT_SCHEMA = "dagkv.m2.calibration_cohort.v1"
-CALIBRATION_RUN_COUNT = 59
-MAX_FORMAL_ATOL = 0.125
-FORMAL_RTOL = 0.0
+try:
+    from tools.m2_calibration_evidence import (
+        CALIBRATION_COHORT_SCHEMA,  # noqa: F401
+        CALIBRATION_RUN_COUNT,  # noqa: F401
+        FORMAL_RTOL,
+        MANIFEST_NAME,
+        MAX_FORMAL_ATOL,
+        PROTOCOL_SCHEMA,
+        CalibrationEvidenceError,
+        validate_campaign_for_aggregation,
+    )
+    from tools.m2_raw_replay import M2RawReplayError, validate_raw_run
+except ModuleNotFoundError as exc:
+    if exc.name != "tools":
+        raise
+    from m2_calibration_evidence import (  # type: ignore[no-redef]
+        CALIBRATION_COHORT_SCHEMA,  # noqa: F401
+        CALIBRATION_RUN_COUNT,  # noqa: F401
+        FORMAL_RTOL,
+        MANIFEST_NAME,
+        MAX_FORMAL_ATOL,
+        PROTOCOL_SCHEMA,
+        CalibrationEvidenceError,
+        validate_campaign_for_aggregation,
+    )
+    from m2_raw_replay import (  # type: ignore[no-redef]
+        M2RawReplayError,
+        validate_raw_run,
+    )
 
 EXPECTED_MEASUREMENTS = ("A1", "G", "B1", "B2", "A2")
 TOLERANT_PAIRS = (("A1", "G"), ("A1", "B1"), ("A1", "B2"))
@@ -49,8 +73,7 @@ REQUIRED_ARTIFACTS = frozenset(
 )
 
 
-class CalibrationAggregationError(RuntimeError):
-    """Raised when any campaign artifact violates the frozen cohort contract."""
+CalibrationAggregationError = CalibrationEvidenceError
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +83,7 @@ class ValidatedRun:
     provenance_sha256: str
     sha256sums_sha256: str
     reproducibility_fingerprint: str
+    implementation_manifest_sha256: str
     observed_max_abs_error: float
 
 
@@ -233,8 +257,8 @@ def _validate_result(result: dict[str, Any], *, run_dir: Path) -> tuple[str, flo
         f"calibration claims a formal pass: {run_dir}",
     )
     require(
-        type(result.get("within_requested_tolerance")) is bool,
-        f"calibration tolerance status is invalid: {run_dir}",
+        result.get("within_requested_tolerance") is True,
+        f"calibration did not pass the preregistered tolerance: {run_dir}",
     )
     run_id = result.get("run_id")
     require(isinstance(run_id, str) and run_id, f"invalid run_id: {run_dir}")
@@ -243,7 +267,10 @@ def _validate_result(result: dict[str, Any], *, run_dir: Path) -> tuple[str, flo
     require(isinstance(tolerance, dict), f"missing calibration tolerance: {run_dir}")
     atol = _finite_number(tolerance.get("atol"), label=f"atol in {run_dir}")
     rtol = _finite_number(tolerance.get("rtol"), label=f"rtol in {run_dir}")
-    require(0.0 <= atol <= MAX_FORMAL_ATOL, f"calibration atol exceeds cap: {run_dir}")
+    require(
+        atol == MAX_FORMAL_ATOL,
+        f"calibration atol must equal the preregistered cap: {run_dir}",
+    )
     require(rtol == FORMAL_RTOL, f"calibration rtol must be zero: {run_dir}")
 
     measurements = result.get("measurements")
@@ -328,6 +355,10 @@ def _validate_result(result: dict[str, Any], *, run_dir: Path) -> tuple[str, flo
                 max_abs_error <= MAX_FORMAL_ATOL,
                 f"tolerant comparison exceeds 0.125 for {pair}: {run_dir}",
             )
+            require(
+                comparison["allclose"] is True,
+                f"tolerant comparison did not pass for {pair}: {run_dir}",
+            )
         seen[pair] = max_abs_error
     require(set(seen) == EXPECTED_PAIRS, f"comparison pairs are incomplete: {run_dir}")
     return run_id, max(seen.values(), default=0.0)
@@ -335,7 +366,7 @@ def _validate_result(result: dict[str, Any], *, run_dir: Path) -> tuple[str, flo
 
 def _validate_provenance(
     provenance: dict[str, Any], *, run_id: str, result: dict[str, Any], run_dir: Path
-) -> str:
+) -> tuple[str, str]:
     require(
         provenance.get("schema_version") == PROTOCOL_SCHEMA,
         f"provenance uses a non-v2 protocol: {run_dir}",
@@ -424,7 +455,7 @@ def _validate_provenance(
         postflight.get("runtime_binary_stats_unchanged") is True,
         f"runtime binaries changed during run: {run_dir}",
     )
-    return fingerprint
+    return fingerprint, implementation_digest
 
 
 def _validate_run(run_dir: Path) -> ValidatedRun:
@@ -462,11 +493,31 @@ def _validate_run(run_dir: Path) -> ValidatedRun:
             f"{phase} logits hash differs from SHA256SUMS: {run_dir}",
         )
     provenance = _read_json_object(provenance_path, label="provenance.json")
-    fingerprint = _validate_provenance(
+    fingerprint, implementation_digest = _validate_provenance(
         provenance,
         run_id=run_id,
         result=result,
         run_dir=run_dir,
+    )
+    try:
+        raw = validate_raw_run(run_dir)
+    except M2RawReplayError as exc:
+        raise CalibrationAggregationError(
+            f"raw artifact replay failed for {run_dir}: {exc}"
+        ) from exc
+    require(raw.run_id == run_id, f"raw replay run_id differs: {run_dir}")
+    require(raw.mode == "calibration", f"raw replay mode differs: {run_dir}")
+    require(
+        raw.observed_max_abs_error == observed_max,
+        f"raw replay maximum error differs: {run_dir}",
+    )
+    require(
+        raw.reproducibility_fingerprint == fingerprint,
+        f"raw replay fingerprint differs: {run_dir}",
+    )
+    require(
+        raw.implementation_manifest_sha256 == implementation_digest,
+        f"raw replay implementation differs: {run_dir}",
     )
     return ValidatedRun(
         run_id=run_id,
@@ -474,6 +525,7 @@ def _validate_run(run_dir: Path) -> ValidatedRun:
         provenance_sha256=entries["provenance.json"],
         sha256sums_sha256=checksum_digest,
         reproducibility_fingerprint=fingerprint,
+        implementation_manifest_sha256=implementation_digest,
         observed_max_abs_error=observed_max,
     )
 
@@ -507,83 +559,54 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     encoded = (
         json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n"
     ).encode("utf-8")
-    path.parent.mkdir(parents=True, exist_ok=True)
+    require(not os.path.lexists(path), f"refusing to overwrite manifest: {path}")
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    linked = False
     try:
         with temporary.open("xb") as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise CalibrationAggregationError(
+                f"refusing to overwrite manifest: {path}"
+            ) from exc
+        linked = True
         _fsync_parent(path)
     finally:
         if temporary.exists():
             temporary.unlink()
+        if linked:
+            _fsync_parent(path)
 
 
 def aggregate_campaign(
     campaign_dir: Path, *, output_path: Path | None = None
 ) -> dict[str, Any]:
-    """Validate every discovered run and atomically write the cohort manifest."""
+    """Validate the closed campaign and exclusively publish its manifest."""
 
     campaign_dir = campaign_dir.resolve()
     require(campaign_dir.is_dir(), f"campaign directory is missing: {campaign_dir}")
-    run_dirs = _discover_run_dirs(campaign_dir)
     destination = (
         output_path.resolve()
         if output_path is not None
-        else campaign_dir / "calibration_cohort.json"
+        else campaign_dir / MANIFEST_NAME
     )
     require(
-        destination.name not in {"result.json", "provenance.json", "SHA256SUMS"},
-        f"unsafe cohort output name: {destination}",
+        destination == campaign_dir / MANIFEST_NAME,
+        f"calibration output must be {campaign_dir / MANIFEST_NAME}",
     )
     require(
-        all(not destination.is_relative_to(run_dir) for run_dir in run_dirs),
-        "cohort output must be outside every run directory",
+        not os.path.lexists(destination),
+        f"refusing to overwrite manifest: {destination}",
     )
-
-    validated = [_validate_run(run_dir) for run_dir in run_dirs]
-    require(
-        len(validated) == CALIBRATION_RUN_COUNT,
-        f"calibration cohort requires exactly {CALIBRATION_RUN_COUNT} runs; "
-        f"observed {len(validated)}",
+    evidence = validate_campaign_for_aggregation(
+        campaign_dir,
+        run_validator=_validate_run,
     )
-    run_ids = {run.run_id for run in validated}
-    result_hashes = {run.result_sha256 for run in validated}
-    require(len(run_ids) == len(validated), "calibration run IDs must be unique")
-    require(
-        len(result_hashes) == len(validated),
-        "calibration result hashes must be unique",
-    )
-    fingerprints = {run.reproducibility_fingerprint for run in validated}
-    require(
-        len(fingerprints) == 1,
-        "calibration reproducibility fingerprints differ",
-    )
-
-    ordered = sorted(validated, key=lambda run: run.run_id)
-    manifest = {
-        "schema_version": CALIBRATION_COHORT_SCHEMA,
-        "protocol_schema": PROTOCOL_SCHEMA,
-        "pilot_excluded": True,
-        "run_count": len(ordered),
-        "all_passed": True,
-        "failures": [],
-        "observed_max_abs_error": max(run.observed_max_abs_error for run in ordered),
-        "formal_atol": MAX_FORMAL_ATOL,
-        "formal_rtol": FORMAL_RTOL,
-        "reproducibility_fingerprint": next(iter(fingerprints)),
-        "runs": [
-            {
-                "run_id": run.run_id,
-                "result_sha256": run.result_sha256,
-                "provenance_sha256": run.provenance_sha256,
-                "sha256sums_sha256": run.sha256sums_sha256,
-            }
-            for run in ordered
-        ],
-    }
+    manifest = evidence.manifest_payload()
     _write_json_atomic(destination, manifest)
     return manifest
 
@@ -597,7 +620,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    output = args.output or args.campaign_dir / "calibration_cohort.json"
+    output = args.output or args.campaign_dir / MANIFEST_NAME
     try:
         manifest = aggregate_campaign(args.campaign_dir, output_path=output)
     except (CalibrationAggregationError, OSError) as exc:

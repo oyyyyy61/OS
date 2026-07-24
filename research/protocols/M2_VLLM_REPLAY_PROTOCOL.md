@@ -62,7 +62,7 @@ is absent.
 
 | Field | Frozen value |
 | --- | --- |
-| Model | content-addressed local Qwen3-8B checkpoint |
+| Model | content-addressed local Qwen3-8B checkpoint; vocabulary size 151,936 |
 | Device topology | one visible GPU; TP=1, PP=1, DP=1 |
 | Execution | eager |
 | Prefix caching | enabled |
@@ -70,7 +70,7 @@ is absent.
 | Prompt | fixed token IDs `1000..1016` (17 tokens) |
 | Decode | one greedy token, fixed seed, EOS ignored |
 | Chunked prefill | enabled; the 17-token prompt fits one 64-token scheduler chunk |
-| Numerical observation | complete vocabulary, `raw_logits`, `max_logprobs=-1` |
+| Numerical observation | exactly 151,936 logits, `raw_logits`, `max_logprobs=-1` |
 | Dtype | BF16 |
 | Attention | `FLASH_ATTN`, FlashAttention version 2 |
 | Connector | external `DAGKVDiagnosticOffloadingConnector` |
@@ -117,8 +117,8 @@ state for a later phase.
 Each successful process must satisfy all of the following before it can appear
 in a calibration or holdout manifest:
 
-1. A1, G, B1, B2, and A2 each produce one identical greedy token and complete,
-   finite raw logits for every vocabulary entry.
+1. A1, G, B1, B2, and A2 each produce one identical greedy token and exactly
+   151,936 finite raw logits, one for every frozen Qwen3-8B vocabulary entry.
 2. `A1 == A2` and `B1 == B2` are exact element-wise comparisons with
    `atol=0, rtol=0`. The cold/replay tolerance cannot mask within-path drift.
 3. `G == B1 == B2` is exact. This isolates D2H/H2D from the ordinary GPU
@@ -141,8 +141,10 @@ in a calibration or holdout manifest:
    same canonical digest and use distinct CPU allocation identities.
 9. Native and diagnostic transfer traces form closed event sets with unique
    IDs, valid parents, no failed terminal, and no submitted DMA left without a
-   verifiable terminal after worker shutdown. Canonical runtime quiescence
-   remains covered by the item 1-7 component evidence.
+   verifiable terminal after worker shutdown. Validation keys rows by transfer
+   identity and event; physical JSONL row order and job-ID magnitude carry no
+   cross-transfer semantics. Canonical runtime quiescence remains covered by
+   the item 1-7 component evidence.
 
 The maximum relative error is descriptive only. Near-zero logits make it
 unstable; it cannot relax or replace the absolute cap.
@@ -164,6 +166,10 @@ A successful process directory contains at least:
   frozen calibration manifest, tolerance, provenance, checksums, and this
   process's `result.json`.
 
+The process directory contains files only at its root and directly under
+`source_state/`. Empty extra directories, special filesystem nodes, symlinks,
+and multiply linked evidence files are invalid.
+
 Calibration never writes a holdout or acceptance manifest. A formal process
 never writes `M2_ITEM8_ACCEPTANCE_MANIFEST.json`.
 
@@ -175,7 +181,10 @@ Every cohort member must record and content-address:
   helper source files;
 - vLLM base commit plus either a clean dedicated commit or a complete binary
   patch and every untracked source file; the recorded Python version and
-  compiled extension hashes must resolve any version/HEAD mismatch;
+  compiled extension hashes must resolve any version/HEAD mismatch. Every
+  implementation and runtime-binary entry has a lowercase SHA-256. The invoked
+  executable resolves to the captured Python binary, and the runtime-binary
+  root, vLLM Git root, and imported vLLM module resolve to one source tree;
 - all model configuration, tokenizer, index, and weight files;
 - Python, dependency lock, vLLM, PyTorch, CUDA runtime/toolkit, driver, OS,
   kernel, attention backend, GPU model, and GPU UUID;
@@ -210,6 +219,90 @@ content-addressed `M2_CALIBRATION_MANIFEST.json` containing the ordered closed
 set of 59 result and provenance hashes, observed run-level maxima, attempt
 inventory, source/runtime fingerprint, protocol hash, and selection rule.
 
+Campaign launch is a two-stage operation. Preparation creates a brand-new
+campaign root containing only `CAMPAIGN_PREREGISTRATION.json`, fsyncs it, and
+prints its SHA-256. Execution requires that digest explicitly, rejects every
+other pre-existing campaign entry, and revalidates the frozen protocol,
+runner, launcher, aggregator, shared evidence validator, independent raw
+replay validator, Python entry point, model/runtime paths, command template,
+environment, implementation manifest, runtime fingerprint, selection rule,
+and no-retry rule before submitting `run-001`. The preregistration digest can
+therefore be recorded and committed before any GPU process starts.
+
+`ATTEMPTS.jsonl` is append-only. Its calibration prefix contains exactly 118
+fsynced records: one `submitted` and one `terminal` record for each of
+`run-001` through `run-059`, in sequence, with no retry or replacement. Every
+passing terminal binds its positive process ID, zero exit status, process
+start/end timestamps, stdout/stderr size and hash, complete artifact
+inventory, result/provenance/checksum hashes, implementation manifest,
+reproducibility fingerprint, and observed maximum absolute error. The first
+submission must follow preregistration; every later submission must follow the
+previous terminal. `run-059` terminal permanently seals the prefix by byte
+length, record count, and SHA-256.
+
+The next ledger record is the single aggregator submission. It binds the
+sealed-prefix triple and the exclusive output path
+`M2_CALIBRATION_MANIFEST.json`. After exclusive publication, one aggregator
+terminal records the manifest and aggregate-log hashes. Its `passed` status is
+the terminal state of the aggregator process and its prospective candidate
+validation; it is not evidence acceptance by itself. The launcher then replays
+the complete 120-record bundle. A failed post-append replay makes the launcher
+exit nonzero and leaves the campaign ineligible for tolerance freezing, even
+though the append-only aggregate operation terminal remains `passed`. Only a
+fresh successful invocation of the shared complete-bundle validator by the
+tolerance freezer or a formal consumer accepts the published evidence. Any
+calibration record after the sealed prefix, any additional campaign directory,
+any changed log or artifact, or any missing/failed terminal invalidates the
+bundle.
+
+The v2 calibration manifest has this exact evidence shape (digest values are
+abbreviated here only for readability):
+
+```json
+{
+  "schema_version": "dagkv.m2.calibration_cohort.v2",
+  "protocol_schema": "dagkv.m2.vllm_abba.v2",
+  "campaign_id": "<preregistered campaign ID>",
+  "campaign_preregistration_file": "CAMPAIGN_PREREGISTRATION.json",
+  "campaign_preregistration_sha256": "<SHA-256>",
+  "attempt_file": "ATTEMPTS.jsonl",
+  "attempt_prefix_bytes": 123456,
+  "attempt_prefix_record_count": 118,
+  "attempt_prefix_sha256": "<SHA-256>",
+  "protocol_sha256": "<SHA-256>",
+  "implementation_manifest_sha256": "<SHA-256>",
+  "selection_rule": {"ordered_run_names": ["run-001", "...", "run-059"]},
+  "pilot_excluded": true,
+  "attempt_count": 59,
+  "run_count": 59,
+  "all_passed": true,
+  "failures": [],
+  "observed_max_abs_error": 0.0,
+  "formal_atol": 0.125,
+  "formal_rtol": 0.0,
+  "reproducibility_fingerprint": "<SHA-256>",
+  "runs": [
+    {
+      "sequence": 1,
+      "run_name": "run-001",
+      "attempt_id": "<campaign ID>:run-001",
+      "run_id": "<process run ID>",
+      "result_sha256": "<SHA-256>",
+      "provenance_sha256": "<SHA-256>",
+      "sha256sums_sha256": "<SHA-256>",
+      "observed_max_abs_error": 0.0
+    }
+  ]
+}
+```
+
+The displayed prefix byte count is illustrative. The displayed
+`selection_rule` is abbreviated; the stored object also fixes
+one attempt per run, calibration-only eligibility, required
+`submitted`/`terminal` events, passing terminal status, zero retries, and
+stop-on-first-failure. The stored run list contains all 59 full entries in
+sequence.
+
 Only then may `M2_FROZEN_TOLERANCE.json` be written. Its exact fields are:
 
 ```json
@@ -226,7 +319,14 @@ Only then may `M2_FROZEN_TOLERANCE.json` be written. Its exact fields are:
 }
 ```
 
-The tolerance file and its Git commit must predate every formal process.
+The tolerance freezer requires an explicit output outside the campaign root
+and every run directory, and publishes with create-only semantics. Before
+freezing, and again before every formal process, the shared validator replays
+the complete upstream bundle: preregistration, ledger prefix and aggregate
+terminal, logs, actual run directories, checksums, manifest mapping, protocol,
+implementation, and fingerprint. The runner also requires its current
+implementation capture to equal the campaign implementation manifest. The
+tolerance file and its Git commit must predate every formal process.
 Command-line overrides are prohibited.
 
 ## Formal Holdouts and Item-8 Acceptance
@@ -251,6 +351,9 @@ listed in an append-only attempt inventory outside the accepted closed set.
 
 - A capability, correctness, trace, checksum, provenance, or cap failure
   invalidates the current candidate implementation. Diagnose and fix it.
+- A post-append complete-bundle replay failure invalidates the campaign and
+  prohibits tolerance freezing; the aggregate process terminal records only
+  the already completed publication operation.
 - A material fix changes the source/runtime fingerprint and protocol evidence
   version. The 59-run calibration cohort restarts from zero.
 - Any formal failure rejects the current 20-run holdout cohort. The frozen

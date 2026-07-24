@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+try:
+    import numpy as np
+except ModuleNotFoundError:
+    np = None
+
+from tools import run_m2_vllm_abba as runner_module
 from tools.run_m2_vllm_abba import (
     CALIBRATION_COHORT_SCHEMA,
     DIAGNOSTIC_SCHEMA,
@@ -33,8 +41,6 @@ from tools.run_m2_vllm_abba import (
     validate_prefetch_result,
     validate_prompt_tokens,
 )
-
-np = pytest.importorskip("numpy")
 
 
 @dataclass
@@ -87,49 +93,9 @@ def _terminal(
     }
 
 
-def test_prompt_is_exactly_one_block_plus_one() -> None:
-    assert validate_prompt_tokens(range(17)) == tuple(range(17))
-    with pytest.raises(M2ValidationError, match="exactly 17"):
-        validate_prompt_tokens(range(16))
-    with pytest.raises(M2ValidationError, match="non-negative"):
-        validate_prompt_tokens([*range(16), -1])
-
-
-def test_dense_logits_accepts_flat_duplicate_sampled_token() -> None:
-    flat = _Flat(
-        start_indices=[0],
-        end_indices=[4],
-        token_ids=[1, 0, 1, 2],
-        logprobs=[2.0, 1.0, 2.0, -3.0],
-    )
-    vector = dense_logits_from_logprobs(flat, 3)
-    np.testing.assert_array_equal(vector, np.array([1.0, 2.0, -3.0]))
-
-
-def test_dense_logits_accepts_mapping_and_rejects_missing_vocab() -> None:
-    vector = dense_logits_from_logprobs(
-        [{0: _Value(1.0), 1: _Value(0.5)}],
-        2,
-    )
-    np.testing.assert_array_equal(vector, np.array([1.0, 0.5]))
-    with pytest.raises(M2ValidationError, match="cover"):
-        dense_logits_from_logprobs([{0: _Value(1.0)}], 2)
-
-
-def test_logit_comparison_reports_tolerance_and_token_state() -> None:
-    left = np.array([1.0, 2.0])
-    right = np.array([1.0, 2.0001])
-    exact = compare_logit_vectors("A", 1, left, "B", 1, right, atol=0.0, rtol=0.0)
-    tolerant = compare_logit_vectors("A", 1, left, "B", 2, right, atol=0.001, rtol=0.0)
-    assert exact.allclose is False
-    assert exact.token_equal is True
-    assert tolerant.allclose is True
-    assert tolerant.token_equal is False
-
-
-def test_frozen_tolerance_must_predate_start(tmp_path: Path) -> None:
+def _write_parent_inputs(tmp_path: Path) -> SimpleNamespace:
     fingerprint = "f" * 64
-    cohort_path = tmp_path / "cohort.json"
+    implementation_sha256 = "a" * 64
     runs = [
         {
             "run_id": f"run-{index}",
@@ -156,10 +122,9 @@ def test_frozen_tolerance_must_predate_start(tmp_path: Path) -> None:
         "reproducibility_fingerprint": fingerprint,
         "runs": runs,
     }
+    cohort_path = tmp_path / "cohort.json"
     cohort_path.write_text(json.dumps(cohort_payload), encoding="utf-8")
-
-    tolerance_path = tmp_path / "tolerance.json"
-    payload = {
+    tolerance_payload = {
         "schema_version": TOLERANCE_SCHEMA,
         "frozen": True,
         "frozen_at_utc": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
@@ -172,34 +137,214 @@ def test_frozen_tolerance_must_predate_start(tmp_path: Path) -> None:
         "calibration_run_count": MIN_CALIBRATION_RUNS,
         "derivation": TOLERANCE_DERIVATION,
     }
-    tolerance_path.write_text(json.dumps(payload), encoding="utf-8")
+    tolerance_path = tmp_path / "tolerance.json"
+    tolerance_path.write_text(json.dumps(tolerance_payload), encoding="utf-8")
+    return SimpleNamespace(
+        cohort_path=cohort_path,
+        cohort_payload=cohort_payload,
+        fingerprint=fingerprint,
+        implementation_sha256=implementation_sha256,
+        runs=runs,
+        tolerance_path=tolerance_path,
+        tolerance_payload=tolerance_payload,
+    )
+
+
+def _mutate_parent_file(path: Path, mutation: str) -> None:
+    before = path.stat()
+    if mutation == "content":
+        raw = path.read_bytes()
+        path.write_bytes(raw + b" ")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    else:
+        assert mutation == "time"
+        os.utime(
+            path,
+            ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000),
+        )
+
+
+def test_prompt_is_exactly_one_block_plus_one() -> None:
+    assert validate_prompt_tokens(range(17)) == tuple(range(17))
+    with pytest.raises(M2ValidationError, match="exactly 17"):
+        validate_prompt_tokens(range(16))
+    with pytest.raises(M2ValidationError, match="non-negative"):
+        validate_prompt_tokens([*range(16), -1])
+
+
+@pytest.mark.skipif(np is None, reason="NumPy is required for logit helper tests")
+def test_dense_logits_accepts_flat_duplicate_sampled_token() -> None:
+    flat = _Flat(
+        start_indices=[0],
+        end_indices=[4],
+        token_ids=[1, 0, 1, 2],
+        logprobs=[2.0, 1.0, 2.0, -3.0],
+    )
+    vector = dense_logits_from_logprobs(flat, 3)
+    np.testing.assert_array_equal(vector, np.array([1.0, 2.0, -3.0]))
+
+
+@pytest.mark.skipif(np is None, reason="NumPy is required for logit helper tests")
+def test_dense_logits_accepts_mapping_and_rejects_missing_vocab() -> None:
+    vector = dense_logits_from_logprobs(
+        [{0: _Value(1.0), 1: _Value(0.5)}],
+        2,
+    )
+    np.testing.assert_array_equal(vector, np.array([1.0, 0.5]))
+    with pytest.raises(M2ValidationError, match="cover"):
+        dense_logits_from_logprobs([{0: _Value(1.0)}], 2)
+
+
+@pytest.mark.skipif(np is None, reason="NumPy is required for logit helper tests")
+def test_logit_comparison_reports_tolerance_and_token_state() -> None:
+    left = np.array([1.0, 2.0])
+    right = np.array([1.0, 2.0001])
+    exact = compare_logit_vectors("A", 1, left, "B", 1, right, atol=0.0, rtol=0.0)
+    tolerant = compare_logit_vectors("A", 1, left, "B", 2, right, atol=0.001, rtol=0.0)
+    assert exact.allclose is False
+    assert exact.token_equal is True
+    assert tolerant.allclose is True
+    assert tolerant.token_equal is False
+
+
+def test_frozen_tolerance_must_predate_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = _write_parent_inputs(tmp_path)
+
+    def validate_bundle(
+        path: Path,
+        *,
+        expected_manifest_sha256: str,
+        expected_implementation_manifest_sha256: str,
+        **_: object,
+    ) -> tuple[dict, str, SimpleNamespace]:
+        observed = hashlib.sha256(path.read_bytes()).hexdigest()
+        if observed != expected_manifest_sha256:
+            raise runner_module.CalibrationEvidenceError(
+                "calibration manifest SHA-256 differs from the expected digest"
+            )
+        assert expected_implementation_manifest_sha256 == parent.implementation_sha256
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        return manifest, observed, SimpleNamespace(runs=tuple(parent.runs))
+
+    monkeypatch.setattr(
+        runner_module,
+        "validate_published_calibration_bundle",
+        validate_bundle,
+    )
     run_started_ns = time.time_ns() + 1_000_000_000
     frozen = load_frozen_tolerance(
-        tolerance_path,
+        parent.tolerance_path,
         run_started_ns=run_started_ns,
     )
     assert frozen.atol == 0.125
-    assert frozen.calibration_manifest_sha256 == payload["calibration_manifest_sha256"]
+    assert (
+        frozen.calibration_manifest_sha256
+        == (parent.tolerance_payload["calibration_manifest_sha256"])
+    )
     cohort = load_calibration_cohort(
-        cohort_path,
+        parent.cohort_path,
         frozen_tolerance=frozen,
         run_started_ns=run_started_ns,
+        expected_implementation_manifest_sha256=parent.implementation_sha256,
     )
     assert cohort["run_count"] == MIN_CALIBRATION_RUNS
 
     with pytest.raises(M2ValidationError, match="before runner startup"):
         load_frozen_tolerance(
-            tolerance_path,
-            run_started_ns=tolerance_path.stat().st_mtime_ns,
+            parent.tolerance_path,
+            run_started_ns=parent.tolerance_path.stat().st_mtime_ns,
         )
 
-    cohort_payload["observed_max_abs_error"] = 0.25
-    cohort_path.write_text(json.dumps(cohort_payload), encoding="utf-8")
-    with pytest.raises(M2ValidationError, match="hash differs"):
+    parent.cohort_payload["observed_max_abs_error"] = 0.25
+    parent.cohort_path.write_text(json.dumps(parent.cohort_payload), encoding="utf-8")
+    with pytest.raises(M2ValidationError, match="SHA-256 differs"):
         load_calibration_cohort(
-            cohort_path,
+            parent.cohort_path,
             frozen_tolerance=frozen,
             run_started_ns=time.time_ns() + 1_000_000_000,
+            expected_implementation_manifest_sha256=parent.implementation_sha256,
+        )
+
+
+def test_parent_evidence_inputs_reject_symlinks(tmp_path: Path) -> None:
+    parent = _write_parent_inputs(tmp_path)
+    run_started_ns = time.time_ns() + 1_000_000_000
+    tolerance_link = tmp_path / "tolerance-link.json"
+    tolerance_link.symlink_to(parent.tolerance_path)
+
+    with pytest.raises(M2ValidationError, match="must be a regular file"):
+        load_frozen_tolerance(tolerance_link, run_started_ns=run_started_ns)
+
+    frozen = load_frozen_tolerance(
+        parent.tolerance_path,
+        run_started_ns=run_started_ns,
+    )
+    cohort_link = tmp_path / "cohort-link.json"
+    cohort_link.symlink_to(parent.cohort_path)
+    with pytest.raises(M2ValidationError, match="must be a regular file"):
+        load_calibration_cohort(
+            cohort_link,
+            frozen_tolerance=frozen,
+            run_started_ns=run_started_ns,
+            expected_implementation_manifest_sha256=parent.implementation_sha256,
+        )
+
+
+@pytest.mark.parametrize("mutation", ["content", "time"])
+def test_tolerance_rejects_mutation_during_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    parent = _write_parent_inputs(tmp_path)
+    original_read = runner_module.read_stable_bytes
+
+    def mutate_after_read(path: Path, *, label: str) -> bytes:
+        raw = original_read(path, label=label)
+        if path == parent.tolerance_path:
+            _mutate_parent_file(path, mutation)
+        return raw
+
+    monkeypatch.setattr(runner_module, "read_stable_bytes", mutate_after_read)
+    with pytest.raises(M2ValidationError, match="changed during validation"):
+        load_frozen_tolerance(
+            parent.tolerance_path,
+            run_started_ns=time.time_ns() + 1_000_000_000,
+        )
+
+
+@pytest.mark.parametrize("mutation", ["content", "time"])
+def test_cohort_rejects_mutation_during_bundle_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    parent = _write_parent_inputs(tmp_path)
+    run_started_ns = time.time_ns() + 1_000_000_000
+    frozen = load_frozen_tolerance(
+        parent.tolerance_path,
+        run_started_ns=run_started_ns,
+    )
+
+    def mutating_bundle(path: Path, **_: object) -> tuple[dict, str, SimpleNamespace]:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        observed = hashlib.sha256(path.read_bytes()).hexdigest()
+        _mutate_parent_file(path, mutation)
+        return payload, observed, SimpleNamespace(runs=tuple(parent.runs))
+
+    monkeypatch.setattr(
+        runner_module,
+        "validate_published_calibration_bundle",
+        mutating_bundle,
+    )
+    with pytest.raises(M2ValidationError, match="changed during validation"):
+        load_calibration_cohort(
+            parent.cohort_path,
+            frozen_tolerance=frozen,
+            run_started_ns=run_started_ns,
+            expected_implementation_manifest_sha256=parent.implementation_sha256,
         )
 
 
@@ -451,3 +596,27 @@ def test_a1_g_control_shares_lifecycle_phase_with_distinct_trace() -> None:
     assert params["offload_phase"] == "A1_G"
     assert params["offload_trace_id"] == "run:G:measurement"
     assert params["max_offload_tokens"] == 0
+
+
+def test_git_capture_sorts_porcelain_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses = {
+        "rev-parse": b"a" * 40 + b"\n",
+        "status": b"?? z.py\n M a.py\nD  middle.py\n",
+        "diff": b"",
+        "ls-files": b"",
+    }
+
+    def fake_run(command: list[str], **_: object) -> SimpleNamespace:
+        return SimpleNamespace(stdout=responses[command[3]])
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    capture = runner_module._git_capture(
+        tmp_path / "source",
+        output_dir=tmp_path / "evidence",
+        label="fixture",
+    )
+
+    assert capture["status_short"] == sorted(capture["status_short"])
+    assert capture["status_short"] == [" M a.py", "?? z.py", "D  middle.py"]

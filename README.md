@@ -43,6 +43,14 @@ referenced by an aggregate acceptance manifest. Exact source, binary, model,
 environment, command, and raw-evidence provenance is fail-closed throughout.
 M2 therefore remains open.
 
+The calibration path now uses a two-stage, no-retry campaign launcher and a
+closed cohort validator. `tools/m2_raw_replay.py` independently reloads the
+five NumPy logit vectors with pickle disabled, recomputes tokens, margins, and
+all seven comparisons, and reconciles the four diagnostic DMA pairs with the
+native lifecycle trace and source-state provenance. These tools are
+pre-acceptance infrastructure: the frozen 59-run calibration and 20-run
+holdout cohorts have not yet been executed.
+
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint
 controller (C2), and deadline-aware partial-prefix single-flight (C3).

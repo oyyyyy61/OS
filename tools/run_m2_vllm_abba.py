@@ -17,6 +17,7 @@ import math
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -30,13 +31,36 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
+try:
+    from tools.aggregate_m2_calibration import (
+        _validate_run as _validate_calibration_run,
+    )
+    from tools.m2_calibration_evidence import (
+        CALIBRATION_COHORT_SCHEMA,  # noqa: F401
+        CalibrationEvidenceError,
+        read_stable_bytes,
+        validate_published_calibration_bundle,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "tools":
+        raise
+    from aggregate_m2_calibration import (  # type: ignore[no-redef]
+        _validate_run as _validate_calibration_run,
+    )
+    from m2_calibration_evidence import (  # type: ignore[no-redef]
+        CALIBRATION_COHORT_SCHEMA,  # noqa: F401
+        CalibrationEvidenceError,
+        read_stable_bytes,
+        validate_published_calibration_bundle,
+    )
+
 PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v2"
 DIAGNOSTIC_SCHEMA = "dagkv.vllm_m2.transfer_probe.v1"
 TOLERANCE_SCHEMA = "dagkv.m2.frozen_tolerance.v2"
-CALIBRATION_COHORT_SCHEMA = "dagkv.m2.calibration_cohort.v1"
 ITEM8_FORMAL_RUN_SCHEMA = "dagkv.m2.item8.formal_run.v1"
 PROMPT_TOKEN_IDS = tuple(range(1000, 1017))
 FROZEN_SEED = 20260724
+FROZEN_QWEN3_8B_VOCAB_SIZE = 151_936
 BLOCK_SIZE = 16
 EXPECTED_EXTERNAL_TOKENS = 16
 MAX_FORMAL_ATOL = 0.125
@@ -92,6 +116,23 @@ def require(condition: bool, message: str) -> None:
 
     if not condition:
         raise M2ValidationError(message)
+
+
+def _regular_file_identity(path: Path, *, label: str) -> tuple[int, int, int, int, int]:
+    """Capture the mutation-sensitive identity of one non-symlink input file."""
+
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise M2ValidationError(f"cannot inspect {label} at {path}: {exc}") from exc
+    require(stat.S_ISREG(value.st_mode), f"{label} must be a regular file: {path}")
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
 
 def validate_prompt_tokens(
@@ -243,14 +284,17 @@ def compare_logit_vectors(
 def load_frozen_tolerance(path: Path, *, run_started_ns: int) -> FrozenTolerance:
     """Load a formal tolerance file proven to predate this process run."""
 
-    require(path.is_file(), f"formal tolerance file is missing: {path}")
+    identity = _regular_file_identity(path, label="formal tolerance file")
     require(
-        path.stat().st_mtime_ns < run_started_ns,
+        identity[3] < run_started_ns,
         "formal tolerance file must be frozen before runner startup",
     )
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = read_stable_bytes(path, label="formal tolerance file")
+        payload = json.loads(raw.decode("utf-8"))
+    except CalibrationEvidenceError as exc:
+        raise M2ValidationError(str(exc)) from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise M2ValidationError(f"invalid formal tolerance file: {exc}") from exc
     require(isinstance(payload, dict), "formal tolerance payload must be an object")
     require(
@@ -317,6 +361,10 @@ def load_frozen_tolerance(path: Path, *, run_started_ns: int) -> FrozenTolerance
         derivation == TOLERANCE_DERIVATION,
         "formal tolerance uses an unregistered derivation",
     )
+    require(
+        _regular_file_identity(path, label="formal tolerance file") == identity,
+        "formal tolerance file changed during validation",
+    )
     return FrozenTolerance(
         atol=atol,
         rtol=rtol,
@@ -325,7 +373,7 @@ def load_frozen_tolerance(path: Path, *, run_started_ns: int) -> FrozenTolerance
         reproducibility_fingerprint=digests["reproducibility_fingerprint"],
         calibration_run_count=calibration_run_count,
         derivation=derivation,
-        file_sha256=sha256_file(path),
+        file_sha256=hashlib.sha256(raw).hexdigest(),
     )
 
 
@@ -334,48 +382,26 @@ def load_calibration_cohort(
     *,
     frozen_tolerance: FrozenTolerance,
     run_started_ns: int,
+    expected_implementation_manifest_sha256: str,
 ) -> dict[str, Any]:
-    """Verify the preregistered multi-process calibration cohort manifest."""
+    """Revalidate the frozen cohort and its complete upstream bundle."""
 
-    require(path.is_file(), f"calibration cohort manifest is missing: {path}")
+    identity = _regular_file_identity(path, label="calibration cohort manifest")
     require(
-        path.stat().st_mtime_ns < run_started_ns,
+        identity[3] < run_started_ns,
         "calibration cohort manifest must predate runner startup",
     )
-    require(
-        sha256_file(path) == frozen_tolerance.calibration_manifest_sha256,
-        "calibration cohort hash differs from the frozen tolerance",
-    )
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise M2ValidationError(f"invalid calibration cohort manifest: {exc}") from exc
-    require(isinstance(payload, dict), "calibration cohort must be an object")
-    require(
-        set(payload)
-        == {
-            "schema_version",
-            "protocol_schema",
-            "pilot_excluded",
-            "run_count",
-            "all_passed",
-            "failures",
-            "observed_max_abs_error",
-            "formal_atol",
-            "formal_rtol",
-            "reproducibility_fingerprint",
-            "runs",
-        },
-        "calibration cohort fields differ from the frozen schema",
-    )
-    require(
-        payload.get("schema_version") == CALIBRATION_COHORT_SCHEMA,
-        "wrong calibration cohort schema",
-    )
-    require(payload.get("protocol_schema") == PROTOCOL_SCHEMA, "cohort protocol drift")
-    require(payload.get("pilot_excluded") is True, "pilot run must be excluded")
-    require(payload.get("all_passed") is True, "calibration cohort did not pass")
-    require(payload.get("failures") == [], "calibration cohort contains failures")
+        payload, _, evidence = validate_published_calibration_bundle(
+            path,
+            run_validator=_validate_calibration_run,
+            expected_manifest_sha256=(frozen_tolerance.calibration_manifest_sha256),
+            expected_implementation_manifest_sha256=(
+                expected_implementation_manifest_sha256
+            ),
+        )
+    except CalibrationEvidenceError as exc:
+        raise M2ValidationError(str(exc)) from exc
     run_count = payload.get("run_count")
     require(
         run_count == frozen_tolerance.calibration_run_count
@@ -403,38 +429,11 @@ def load_calibration_cohort(
         == frozen_tolerance.reproducibility_fingerprint,
         "calibration cohort reproducibility fingerprint differs",
     )
-    runs = payload.get("runs")
-    require(isinstance(runs, list) and len(runs) == run_count, "cohort runs missing")
-    run_ids: set[str] = set()
-    result_hashes: set[str] = set()
-    for run in runs:
-        require(isinstance(run, dict), "calibration cohort run must be an object")
-        require(
-            set(run)
-            == {
-                "run_id",
-                "result_sha256",
-                "provenance_sha256",
-                "sha256sums_sha256",
-            },
-            "calibration cohort run fields differ",
-        )
-        for name in ("result_sha256", "provenance_sha256", "sha256sums_sha256"):
-            digest = run.get(name)
-            require(
-                isinstance(digest, str)
-                and len(digest) == 64
-                and all(char in "0123456789abcdef" for char in digest),
-                f"calibration cohort {name} is invalid",
-            )
-        require(
-            isinstance(run.get("run_id"), str) and run["run_id"],
-            "calibration cohort run ID is invalid",
-        )
-        run_ids.add(run["run_id"])
-        result_hashes.add(run["result_sha256"])
-    require(len(run_ids) == run_count, "calibration run IDs must be unique")
-    require(len(result_hashes) == run_count, "calibration results must be unique")
+    require(len(evidence.runs) == run_count, "cohort evidence run count drifted")
+    require(
+        _regular_file_identity(path, label="calibration cohort manifest") == identity,
+        "calibration cohort manifest changed during validation",
+    )
     return payload
 
 
@@ -1169,7 +1168,7 @@ def _git_capture(root: Path, *, output_dir: Path, label: str) -> dict[str, Any]:
     root = root.resolve()
     head = run("rev-parse", "HEAD").decode("ascii").strip()
     require(len(head) == 40, f"{label} Git HEAD is invalid")
-    status = (
+    status = sorted(
         run("status", "--short", "--untracked-files=all").decode("utf-8").splitlines()
     )
     tracked_diff = run("diff", "--binary", "HEAD", "--")
@@ -1262,6 +1261,11 @@ def _implementation_capture() -> dict[str, Any]:
         REPO_ROOT / "research" / "REFERENCES.md",
         REPO_ROOT / "research" / "imported" / "RELATED_WORK_MATRIX.md",
         Path(__file__).resolve(),
+        REPO_ROOT / "tools" / "aggregate_m2_calibration.py",
+        REPO_ROOT / "tools" / "freeze_m2_tolerance.py",
+        REPO_ROOT / "tools" / "m2_calibration_evidence.py",
+        REPO_ROOT / "tools" / "m2_raw_replay.py",
+        REPO_ROOT / "tools" / "run_m2_calibration_campaign.py",
     }
     for root in (REPO_ROOT / "src", INTEGRATION_ROOT / "dagkv_vllm_m2"):
         paths.update(path for path in root.rglob("*.py") if path.is_file())
@@ -1654,7 +1658,10 @@ def _capability_preflight(
         f"M2 requires Qwen3, observed architectures={architectures}",
     )
     vocab_size = model_config.get("vocab_size")
-    require(type(vocab_size) is int and vocab_size > max(PROMPT_TOKEN_IDS), "bad vocab")
+    require(
+        vocab_size == FROZEN_QWEN3_8B_VOCAB_SIZE,
+        "model vocabulary differs from the frozen Qwen3-8B vocabulary",
+    )
     return {
         "vllm_version": getattr(vllm, "__version__", None),
         "vllm_module": str(module_root),
@@ -1704,7 +1711,12 @@ def _validate_engine_config(llm: Any) -> int:
     snapshot = llm.get_kv_cache_snapshot()
     for key in ("total_blocks", "used_blocks", "free_blocks", "usage_ratio"):
         require(key in snapshot, f"KV snapshot lacks {key}")
-    return config.model_config.get_vocab_size()
+    vocab_size = config.model_config.get_vocab_size()
+    require(
+        vocab_size == FROZEN_QWEN3_8B_VOCAB_SIZE,
+        "engine vocabulary differs from the frozen Qwen3-8B vocabulary",
+    )
+    return vocab_size
 
 
 def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> None:
@@ -1715,6 +1727,7 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
         args.full_provenance,
         "M2 v2 runs require --full-provenance",
     )
+    implementation = _implementation_capture()
     frozen_tolerance: FrozenTolerance | None = None
     calibration_cohort: dict[str, Any] | None = None
     if args.mode == "formal":
@@ -1729,12 +1742,14 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
             "formal mode requires --calibration-manifest",
         )
         frozen_tolerance = load_frozen_tolerance(
-            args.tolerance_file.resolve(), run_started_ns=run_started_ns
+            args.tolerance_file.expanduser().absolute(),
+            run_started_ns=run_started_ns,
         )
         calibration_cohort = load_calibration_cohort(
-            args.calibration_manifest.resolve(),
+            args.calibration_manifest.expanduser().absolute(),
             frozen_tolerance=frozen_tolerance,
             run_started_ns=run_started_ns,
+            expected_implementation_manifest_sha256=(implementation["manifest_sha256"]),
         )
         atol, rtol = frozen_tolerance.atol, frozen_tolerance.rtol
     else:
@@ -1796,7 +1811,6 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
             not dagkv_git["dirty"],
             "formal mode requires a clean DAGKV Git worktree",
         )
-    implementation = _implementation_capture()
     model_capture = _model_capture(
         args.model,
         full_hashes=args.full_provenance,

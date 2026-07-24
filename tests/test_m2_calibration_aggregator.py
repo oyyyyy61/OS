@@ -2,295 +2,415 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from tests.m2_calibration_fixtures import build_calibration_campaign
 from tools.aggregate_m2_calibration import (
     CALIBRATION_COHORT_SCHEMA,
-    EXACT_PAIRS,
     PROTOCOL_SCHEMA,
-    TOLERANT_PAIRS,
     CalibrationAggregationError,
+    _validate_run,
     aggregate_campaign,
+)
+from tools.m2_calibration_evidence import (
+    MANIFEST_FIELDS,
+    MANIFEST_RUN_FIELDS,
+    CalibrationEvidenceError,
+    _validate_frozen_entry,
+    validate_published_calibration_bundle,
+    validate_published_calibration_candidate,
 )
 from tools.run_m2_vllm_abba import (
     CALIBRATION_COHORT_SCHEMA as RUNNER_COHORT_SCHEMA,
 )
-from tools.run_m2_vllm_abba import MIN_CALIBRATION_RUNS as RUNNER_CALIBRATION_RUN_COUNT
-from tools.run_m2_vllm_abba import PROTOCOL_SCHEMA as RUNNER_PROTOCOL_SCHEMA
-from tools.run_m2_vllm_abba import (
-    TOLERANCE_DERIVATION,
-    FrozenTolerance,
-    load_calibration_cohort,
-)
+from tools.run_m2_vllm_abba import MIN_CALIBRATION_RUNS
 
 
-def _digest(payload: object) -> str:
-    encoded = json.dumps(
-        payload,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _write_json(path: Path, payload: object) -> None:
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-
-
-def _write_checksums(run_dir: Path) -> None:
-    paths = sorted(
-        path
-        for path in run_dir.rglob("*")
-        if path.is_file() and path.name != "SHA256SUMS"
-    )
-    lines = [
-        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
-        f"{path.relative_to(run_dir).as_posix()}"
-        for path in paths
+def _attempt_rows(campaign: Path) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in (campaign / "ATTEMPTS.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
-    (run_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
-def _make_run(
-    campaign: Path,
-    index: int,
-    *,
-    fingerprint_seed: str = "shared",
-    gate_status: str = "CALIBRATED_NOT_ACCEPTED",
-    with_checksums: bool = True,
-) -> Path:
-    run_dir = campaign / f"run-{index:03d}"
-    run_dir.mkdir()
-    run_id = f"m2-run-{index:03d}"
-    for name, payload in {
-        "diagnostic_transfers.jsonl": b'{"event":"terminal"}\n',
-        "execution_ids.json": b"{}\n",
-        "native_lifecycle.jsonl": b'{"event":"lookup"}\n',
-        "protocol.md": b"# frozen protocol\n",
-    }.items():
-        (run_dir / name).write_bytes(payload)
-    logits_hashes: dict[str, str] = {}
-    for phase in ("A1", "G", "B1", "B2", "A2"):
-        path = run_dir / f"logits_{phase}.npy"
-        path.write_bytes(f"fixture-logits-{phase}-{index}".encode())
-        logits_hashes[phase] = hashlib.sha256(path.read_bytes()).hexdigest()
-    measurements = {
-        phase: {
-            "token_id": 42,
-            "top1_margin": 0.5 + index / 100_000,
-            "num_cached_tokens": 0 if phase in {"A1", "A2"} else 16,
-            "logits_file": f"logits_{phase}.npy",
-            "logits_sha256": logits_hashes[phase],
-        }
-        for phase in ("A1", "G", "B1", "B2", "A2")
-    }
-    comparisons = [
-        {
-            "left": left,
-            "right": right,
-            "token_equal": True,
-            "allclose": False,
-            "max_abs_error": 0.1,
-            "max_rel_error": 0.01,
-        }
-        for left, right in TOLERANT_PAIRS
-    ]
-    comparisons.extend(
-        {
-            "left": left,
-            "right": right,
-            "token_equal": True,
-            "allclose": True,
-            "max_abs_error": 0.0,
-            "max_rel_error": 0.0,
-        }
-        for left, right in EXACT_PAIRS
+def _write_attempt_rows(campaign: Path, rows: list[dict[str, object]]) -> None:
+    encoded = "".join(
+        json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows
     )
-    components = {"frozen_environment": fingerprint_seed}
-    fingerprint = _digest(components)
-    result = {
-        "schema_version": PROTOCOL_SCHEMA,
-        "run_id": run_id,
-        "mode": "calibration",
-        "gate_status": gate_status,
-        "m2_accepted": False,
-        "m2_item8_accepted": False,
-        "formal_run_passed": False,
-        "within_requested_tolerance": False,
-        "tolerance": {"atol": 0.0, "rtol": 0.0},
-        "minimum_top1_margin": min(
-            measurement["top1_margin"] for measurement in measurements.values()
-        ),
-        "reproducibility_fingerprint": fingerprint,
-        "measurements": measurements,
-        "comparisons": comparisons,
-    }
-    implementation_digest = hashlib.sha256(b"implementation").hexdigest()
-    dagkv_digest = hashlib.sha256(b"dagkv").hexdigest()
-    vllm_digest = hashlib.sha256(b"vllm").hexdigest()
-    provenance = {
-        "schema_version": PROTOCOL_SCHEMA,
-        "run_id": run_id,
-        "mode": "calibration",
-        "full_provenance": True,
-        "prompt_token_ids": list(range(1000, 1017)),
-        "block_size": 16,
-        "tolerance": {"atol": 0.0, "rtol": 0.0},
-        "reproducibility_components": components,
-        "reproducibility_fingerprint": fingerprint,
-        "implementation": {"manifest_sha256": implementation_digest},
-        "dagkv_git": {"snapshot_sha256": dagkv_digest},
-        "vllm_git": {"snapshot_sha256": vllm_digest},
-        "postflight": {
-            "implementation_manifest_sha256": implementation_digest,
-            "dagkv_git_snapshot_sha256": dagkv_digest,
-            "vllm_git_snapshot_sha256": vllm_digest,
-            "model_file_stats_unchanged": True,
-            "runtime_binary_stats_unchanged": True,
-        },
-    }
-    _write_json(run_dir / "result.json", result)
-    _write_json(run_dir / "provenance.json", provenance)
-    if with_checksums:
-        _write_checksums(run_dir)
-    return run_dir
+    (campaign / "ATTEMPTS.jsonl").write_text(encoded, encoding="utf-8")
 
 
-def _make_campaign(root: Path, count: int = 59) -> Path:
-    campaign = root / "campaign"
-    campaign.mkdir()
-    for index in range(count):
-        _make_run(campaign, index)
-    return campaign
+def test_aggregates_the_preregistered_59_process_closed_set(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
 
+    manifest = aggregate_campaign(fixture.campaign_root)
 
-def test_aggregates_59_valid_runs_atomically(tmp_path: Path) -> None:
-    campaign = _make_campaign(tmp_path)
-    output = tmp_path / "cohort.json"
-
-    manifest = aggregate_campaign(campaign, output_path=output)
-
+    assert set(manifest) == MANIFEST_FIELDS
     assert manifest["schema_version"] == CALIBRATION_COHORT_SCHEMA
-    assert manifest["protocol_schema"] == PROTOCOL_SCHEMA
     assert CALIBRATION_COHORT_SCHEMA == RUNNER_COHORT_SCHEMA
-    assert PROTOCOL_SCHEMA == RUNNER_PROTOCOL_SCHEMA
-    assert manifest["run_count"] == 59
-    assert RUNNER_CALIBRATION_RUN_COUNT == 59
+    assert manifest["protocol_schema"] == PROTOCOL_SCHEMA
+    assert manifest["campaign_preregistration_file"] == (
+        "CAMPAIGN_PREREGISTRATION.json"
+    )
+    assert manifest["campaign_preregistration_sha256"] == (
+        fixture.preregistration_sha256
+    )
+    assert manifest["attempt_file"] == "ATTEMPTS.jsonl"
+    assert manifest["attempt_prefix_record_count"] == 118
+    assert manifest["attempt_count"] == manifest["run_count"] == 59
+    assert MIN_CALIBRATION_RUNS == 59
+    assert manifest["implementation_manifest_sha256"] == (
+        fixture.implementation_manifest_sha256
+    )
+    assert manifest["reproducibility_fingerprint"] == (
+        fixture.reproducibility_fingerprint
+    )
     assert manifest["observed_max_abs_error"] == 0.1
     assert manifest["formal_atol"] == 0.125
     assert manifest["formal_rtol"] == 0.0
     assert manifest["all_passed"] is True
     assert manifest["failures"] == []
-    assert len({run["run_id"] for run in manifest["runs"]}) == 59
-    assert all(
-        set(run)
-        == {
-            "run_id",
-            "result_sha256",
-            "provenance_sha256",
-            "sha256sums_sha256",
-        }
-        for run in manifest["runs"]
+    assert [run["sequence"] for run in manifest["runs"]] == list(range(1, 60))
+    assert [run["run_name"] for run in manifest["runs"]] == [
+        f"run-{index:03d}" for index in range(1, 60)
+    ]
+    assert all(set(run) == MANIFEST_RUN_FIELDS for run in manifest["runs"])
+    assert json.loads(fixture.manifest_path.read_text(encoding="utf-8")) == manifest
+    candidate, candidate_sha256, evidence = validate_published_calibration_candidate(
+        fixture.manifest_path,
+        run_validator=_validate_run,
+        expected_implementation_manifest_sha256=(
+            fixture.implementation_manifest_sha256
+        ),
     )
-    assert json.loads(output.read_text(encoding="utf-8")) == manifest
-    manifest_sha256 = hashlib.sha256(output.read_bytes()).hexdigest()
-    frozen_tolerance = FrozenTolerance(
-        atol=0.125,
-        rtol=0.0,
-        frozen_at_utc="2026-07-25T00:00:00+00:00",
-        calibration_manifest_sha256=manifest_sha256,
-        reproducibility_fingerprint=manifest["reproducibility_fingerprint"],
-        calibration_run_count=59,
-        derivation=TOLERANCE_DERIVATION,
-        file_sha256="f" * 64,
-    )
+    assert candidate == manifest
     assert (
-        load_calibration_cohort(
-            output,
-            frozen_tolerance=frozen_tolerance,
-            run_started_ns=time.time_ns() + 1_000_000_000,
+        candidate_sha256
+        == hashlib.sha256(fixture.manifest_path.read_bytes()).hexdigest()
+    )
+    assert len(evidence.runs) == 59
+    assert not list(fixture.campaign_root.glob(".*.tmp"))
+
+
+def test_candidate_requires_exactly_119_attempt_records(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=True)
+
+    with pytest.raises(CalibrationEvidenceError, match="record count"):
+        validate_published_calibration_candidate(
+            fixture.manifest_path,
+            run_validator=_validate_run,
         )
-        == manifest
+
+
+def test_final_bundle_requires_the_aggregate_terminal(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    aggregate_campaign(fixture.campaign_root)
+
+    with pytest.raises(CalibrationEvidenceError, match="record count"):
+        validate_published_calibration_bundle(
+            fixture.manifest_path,
+            run_validator=_validate_run,
+        )
+
+
+def test_candidate_rejects_manifest_mapping_tampering(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    aggregate_campaign(fixture.campaign_root)
+    manifest = json.loads(fixture.manifest_path.read_text(encoding="utf-8"))
+    manifest["runs"][0]["attempt_id"] = "replacement-attempt"
+    fixture.manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
-    assert not list(tmp_path.glob(".cohort.json.*.tmp"))
-    assert not list(tmp_path.rglob("*ACCEPTANCE*"))
+
+    with pytest.raises(CalibrationEvidenceError, match="mapping drifted"):
+        validate_published_calibration_candidate(
+            fixture.manifest_path,
+            run_validator=_validate_run,
+        )
 
 
-def test_rejects_fewer_than_59_runs_without_writing_manifest(tmp_path: Path) -> None:
-    campaign = _make_campaign(tmp_path, count=58)
-    output = tmp_path / "cohort.json"
+def test_candidate_rejects_campaign_mutation_during_replay(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    aggregate_campaign(fixture.campaign_root)
 
-    with pytest.raises(CalibrationAggregationError, match="exactly 59"):
-        aggregate_campaign(campaign, output_path=output)
+    def mutating_validator(run_dir: Path):
+        validated = _validate_run(run_dir)
+        if run_dir.name == "run-059":
+            earlier = fixture.campaign_root / "run-001" / "result.json"
+            earlier.write_bytes(earlier.read_bytes() + b" ")
+        return validated
 
-    assert not output.exists()
-
-
-def test_rejects_more_than_59_runs_without_writing_manifest(tmp_path: Path) -> None:
-    campaign = _make_campaign(tmp_path, count=60)
-    output = tmp_path / "cohort.json"
-
-    with pytest.raises(CalibrationAggregationError, match="exactly 59"):
-        aggregate_campaign(campaign, output_path=output)
-
-    assert not output.exists()
+    with pytest.raises(CalibrationEvidenceError, match="changed during validation"):
+        validate_published_calibration_candidate(
+            fixture.manifest_path,
+            run_validator=mutating_validator,
+        )
 
 
-def test_partial_attempt_directory_invalidates_campaign(tmp_path: Path) -> None:
-    campaign = _make_campaign(tmp_path)
-    (campaign / "run-partial").mkdir()
-    output = tmp_path / "cohort.json"
+def test_candidate_rejects_external_hardlink_to_evidence(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    aggregate_campaign(fixture.campaign_root)
+    external_alias = tmp_path / "external-result-alias.json"
+    os.link(fixture.campaign_root / "run-001" / "result.json", external_alias)
 
-    with pytest.raises(CalibrationAggregationError, match="lacks result.json"):
-        aggregate_campaign(campaign, output_path=output)
+    with pytest.raises(CalibrationEvidenceError, match="external hard link"):
+        validate_published_calibration_candidate(
+            fixture.manifest_path,
+            run_validator=_validate_run,
+        )
 
-    assert not output.exists()
-
-
-def test_any_failed_result_invalidates_the_whole_campaign(tmp_path: Path) -> None:
-    campaign = _make_campaign(tmp_path)
-    _make_run(
-        campaign,
-        59,
-        gate_status="FAILED",
-        with_checksums=False,
-    )
-    output = tmp_path / "cohort.json"
-
-    with pytest.raises(CalibrationAggregationError, match="did not complete"):
-        aggregate_campaign(campaign, output_path=output)
-
-    assert not output.exists()
+    assert external_alias.is_file()
 
 
-def test_checksum_tampering_invalidates_the_campaign(tmp_path: Path) -> None:
-    campaign = _make_campaign(tmp_path)
-    provenance = campaign / "run-017" / "provenance.json"
-    provenance.write_text(
-        provenance.read_text(encoding="utf-8") + "\n", encoding="utf-8"
-    )
-    output = tmp_path / "cohort.json"
+def test_requires_the_exclusive_manifest_location(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    outside = tmp_path / "cohort.json"
+
+    with pytest.raises(CalibrationAggregationError, match="output must be"):
+        aggregate_campaign(fixture.campaign_root, output_path=outside)
+
+    assert not outside.exists()
+    assert not fixture.manifest_path.exists()
+
+
+def test_refuses_to_overwrite_a_published_manifest(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=True)
+    before = fixture.manifest_path.read_bytes()
+
+    with pytest.raises(CalibrationAggregationError, match="refusing to overwrite"):
+        aggregate_campaign(fixture.campaign_root)
+
+    assert fixture.manifest_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("pid", 0, "clean process terminal"),
+        ("exit_code", 7, "clean process terminal"),
+        ("timed_out", True, "clean process terminal"),
+        ("started_at_utc", "2027-01-01T00:00:00+00:00", "out of order"),
+    ],
+)
+def test_rejects_invalid_process_activity(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    rows = _attempt_rows(fixture.campaign_root)
+    rows[33][field] = value
+    _write_attempt_rows(fixture.campaign_root, rows)
+
+    with pytest.raises(CalibrationAggregationError, match=message):
+        aggregate_campaign(fixture.campaign_root)
+
+    assert not fixture.manifest_path.exists()
+
+
+def test_rejects_log_hash_tampering(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    log = fixture.campaign_root / "run-017.stdout.log"
+    log.write_text(log.read_text(encoding="utf-8") + "tampered\n", encoding="utf-8")
+
+    with pytest.raises(CalibrationAggregationError, match="stdout size drifted"):
+        aggregate_campaign(fixture.campaign_root)
+
+
+def test_rejects_terminal_to_artifact_mapping_tampering(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    rows = _attempt_rows(fixture.campaign_root)
+    validation = rows[33]["validation"]
+    assert isinstance(validation, dict)
+    validation["result_sha256"] = hashlib.sha256(b"replacement").hexdigest()
+    _write_attempt_rows(fixture.campaign_root, rows)
+
+    with pytest.raises(CalibrationAggregationError, match="validation mapping drifted"):
+        aggregate_campaign(fixture.campaign_root)
+
+
+def test_rejects_aggregate_prefix_tampering(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    rows = _attempt_rows(fixture.campaign_root)
+    prefix = rows[-1]["calibration_prefix"]
+    assert isinstance(prefix, dict)
+    prefix["prefix_bytes"] = int(prefix["prefix_bytes"]) + 1
+    _write_attempt_rows(fixture.campaign_root, rows)
+
+    with pytest.raises(CalibrationAggregationError, match="calibration_prefix drifted"):
+        aggregate_campaign(fixture.campaign_root)
+
+
+def test_rejects_any_calibration_after_the_sealed_prefix(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    rows = _attempt_rows(fixture.campaign_root)
+    rows.append(dict(rows[0]))
+    _write_attempt_rows(fixture.campaign_root, rows)
+
+    with pytest.raises(CalibrationAggregationError, match="record count"):
+        aggregate_campaign(fixture.campaign_root)
+
+
+def test_rejects_preregistration_or_frozen_protocol_tampering(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    protocol = fixture.campaign_root / "run-017" / "protocol.md"
+    protocol.write_text("tampered protocol\n", encoding="utf-8")
 
     with pytest.raises(CalibrationAggregationError, match="checksum mismatch"):
-        aggregate_campaign(campaign, output_path=output)
-
-    assert not output.exists()
+        aggregate_campaign(fixture.campaign_root)
 
 
-def test_reproducibility_fingerprint_drift_invalidates_campaign(
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("within_requested_tolerance", False, "did not pass"),
+        ("gate_status", "FAILED", "did not complete"),
+    ],
+)
+def test_rejects_failed_result_even_when_the_ledger_claims_passed(
     tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
 ) -> None:
-    campaign = _make_campaign(tmp_path, count=58)
-    _make_run(campaign, 58, fingerprint_seed="drifted")
-    output = tmp_path / "cohort.json"
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    result_path = fixture.campaign_root / "run-017" / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result[field] = value
+    result_path.write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
-    with pytest.raises(CalibrationAggregationError, match="fingerprints differ"):
-        aggregate_campaign(campaign, output_path=output)
+    with pytest.raises(CalibrationAggregationError, match=message):
+        aggregate_campaign(fixture.campaign_root)
 
-    assert not output.exists()
+
+def test_rejects_undeclared_or_missing_attempt_directories(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    (fixture.campaign_root / "run-060").mkdir()
+
+    with pytest.raises(CalibrationAggregationError, match="undeclared entries"):
+        aggregate_campaign(fixture.campaign_root)
+
+
+def test_rejects_frozen_evidence_helper_drift(tmp_path: Path) -> None:
+    helper = tmp_path / "m2_calibration_evidence.py"
+    helper.write_text("frozen helper\n", encoding="utf-8")
+    entry = {
+        "path": str(helper),
+        "size": helper.stat().st_size,
+        "sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+    }
+    helper.write_text("drifted helper\n", encoding="utf-8")
+
+    with pytest.raises(CalibrationEvidenceError, match="size drifted"):
+        _validate_frozen_entry(entry, label="frozen evidence")
+
+
+def test_rejects_python_entrypoint_retargeting(tmp_path: Path) -> None:
+    first = tmp_path / "python-a"
+    second = tmp_path / "python-b"
+    first.write_bytes(b"interpreter-a")
+    second.write_bytes(b"interpreter-b")
+    entrypoint = tmp_path / "venv" / "bin" / "python"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.symlink_to(first)
+    entry = {
+        "path": str(entrypoint),
+        "size": first.stat().st_size,
+        "sha256": hashlib.sha256(first.read_bytes()).hexdigest(),
+    }
+    _validate_frozen_entry(
+        entry,
+        label="Python executable",
+        allow_executable_symlink=True,
+    )
+    entrypoint.unlink()
+    entrypoint.symlink_to(second)
+
+    with pytest.raises(CalibrationEvidenceError, match="SHA-256 drifted"):
+        _validate_frozen_entry(
+            entry,
+            label="Python executable",
+            allow_executable_symlink=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("row_index", "source", "message"),
+    [
+        (0, "preregistration", "frozen predecessor"),
+        (2, "previous_terminal", "frozen predecessor"),
+        (118, "last_terminal", "aggregate started before"),
+    ],
+)
+def test_rejects_campaign_chronology_tampering(
+    tmp_path: Path,
+    row_index: int,
+    source: str,
+    message: str,
+) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    rows = _attempt_rows(fixture.campaign_root)
+    preregistration = json.loads(
+        (fixture.campaign_root / "CAMPAIGN_PREREGISTRATION.json").read_text()
+    )
+    if source == "preregistration":
+        timestamp = datetime.fromisoformat(preregistration["created_at_utc"])
+        rows[row_index]["timestamp_utc"] = (
+            timestamp - timedelta(seconds=1)
+        ).isoformat()
+    elif source == "previous_terminal":
+        timestamp = datetime.fromisoformat(str(rows[1]["timestamp_utc"]))
+        rows[row_index]["timestamp_utc"] = (
+            timestamp - timedelta(seconds=1)
+        ).isoformat()
+    else:
+        timestamp = datetime.fromisoformat(str(rows[117]["timestamp_utc"]))
+        rows[row_index]["timestamp_utc"] = (
+            timestamp - timedelta(seconds=1)
+        ).isoformat()
+    _write_attempt_rows(fixture.campaign_root, rows)
+
+    with pytest.raises(CalibrationAggregationError, match=message):
+        aggregate_campaign(fixture.campaign_root)
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    [
+        "aggregate_m2_calibration.py",
+        "freeze_m2_tolerance.py",
+        "run_m2_vllm_abba.py",
+    ],
+)
+def test_tools_import_in_absolute_script_mode(
+    tmp_path: Path,
+    script_name: str,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(repo_root / "integrations" / "vllm_m2")
+
+    completed = subprocess.run(
+        [sys.executable, str(repo_root / "tools" / script_name), "--help"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
