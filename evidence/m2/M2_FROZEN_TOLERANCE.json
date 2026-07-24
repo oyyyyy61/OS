@@ -1,0 +1,11 @@
+{
+  "atol": 0.125,
+  "calibration_manifest_sha256": "0b543cc6bbcf1fa034e3d3287a82620b6b14e6aae4a99d9c6ca8e39b2c60f2db",
+  "calibration_run_count": 59,
+  "derivation": "fixed_binary_cap_from_excluded_pilot",
+  "frozen": true,
+  "frozen_at_utc": "2026-07-24T21:58:57.282910+00:00",
+  "reproducibility_fingerprint": "29a746cfa88d5ec0fc05863d629a10a4745cf91c7723697802191781136760f6",
+  "rtol": 0.0,
+  "schema_version": "dagkv.m2.frozen_tolerance.v2"
+}

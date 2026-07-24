@@ -50,9 +50,11 @@ The calibration path now uses a two-stage, no-retry campaign launcher and a
 closed cohort validator. `tools/m2_raw_replay.py` independently reloads the
 five NumPy logit vectors with pickle disabled, recomputes tokens, margins, and
 all seven comparisons, and reconciles the four diagnostic DMA pairs with the
-native lifecycle trace and source-state provenance. These tools are
-pre-acceptance infrastructure: the frozen 59-run calibration and 20-run
-holdout cohorts have not yet been executed.
+native lifecycle trace and source-state provenance. The preregistered 59-run
+calibration cohort has now passed with 59 unique run IDs and result hashes,
+zero failures, and `max_abs=0.109375` in every run. Its create-only tolerance
+file freezes `atol=0.125, rtol=0`. This remains pre-acceptance infrastructure:
+the 20-run formal holdout cohort has not yet been executed.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint
