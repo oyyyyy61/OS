@@ -36,20 +36,24 @@ and cannot become the primary claim through this M2 result.
 
 ## Pilot Exclusion
 
-`/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_calibration_20260725_run03` is a
-successful v1 pilot only. Its checksummed evidence recorded:
+`evidence/m2/PILOT_ATTEMPTS.json` is the append-only index for protocol-design
+executions. It includes failed v1 ID-correlation attempts, the successful v1
+run03 numerical pilot, the failed v2 A1/G phase-boundary attempt, and subsequent
+successful v2 validation pilots. Every indexed attempt is excluded from the
+59-run calibration cohort and the 20-run formal holdout cohort.
 
-- exact D2H/H2D canonical digests and byte counts for B1 and B2;
-- token 932 for A1, B1, B2, and A2;
-- exact A1/A2 and B1/B2 raw-logit vectors;
-- cold/replay `max_abs_error=0.109375` under BF16;
-- `CALIBRATED_NOT_ACCEPTED`, `m2_item8_accepted=false`, and no acceptance
-  manifest.
+The latest indexed successful pilot at protocol freeze recorded exact D2H/H2D
+canonical digests and byte counts, token 932 in all five phases, exact A1/A2,
+exact `G=B1=B2`, and cold/prefix `max_abs_error=0.109375` under BF16. This
+localizes the observed numerical difference to the cold-prefill versus
+GPU-prefix execution path for the frozen profile. It does not show general
+numerical equivalence across models or prompts.
 
-Run03 helped define v2 and is excluded from the 59-run calibration cohort and
-the 20-run formal holdout cohort. Its B1 and B2 are state-isolated repetitions
-within one engine process, not independent calibration samples. No failed or
-partial v1 attempt may be promoted into either v2 cohort.
+Any additional protocol-validation execution completed before the campaign
+launch marker is also a pilot even if it succeeds. B1 and B2 remain
+state-isolated repetitions within one engine process and cannot count as
+independent calibration samples. No failed, partial, or pilot attempt may be
+promoted into either cohort.
 
 ## Frozen Runtime Profile
 
@@ -187,10 +191,11 @@ identical frozen fingerprint across all 20 holdouts.
 
 ## Calibration Cohort and Frozen Tolerance
 
-Run03 is the pilot and contributes no sample. After the v2 protocol and source
-are frozen, launch exactly 59 successful calibration processes. Each process
-must create a new OS process, CUDA context, vLLM engine, run ID, and output
-directory. Engine reuse across samples is prohibited.
+All attempt-index entries and pre-launch validation pilots contribute no
+sample. After the v2 protocol and source are frozen, launch exactly 59
+successful calibration processes. Each process must create a new OS process,
+CUDA context, vLLM engine, run ID, and output directory. Engine reuse across
+samples is prohibited.
 
 The unit of analysis is one complete process. Vocabulary entries and B1/B2 are
 correlated observations and cannot inflate the sample count. With zero cap

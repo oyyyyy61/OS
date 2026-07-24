@@ -24,11 +24,14 @@ scope until M2 passes.
 The clean runtime now contains the canonical schema, transactional lifecycle
 ledger, DAG node gate, generation-safe transfer reservations, shared-owner
 orchestrator, and conservation auditor. These are component results for M2
-items 1-7. The successful `m2_vllm_abba_calibration_20260725_run03` execution
-is retained only as a pilot: it established exact canonical DMA digests, equal
-greedy tokens, exact A1/A2 and B1/B2 repeats, and an observed BF16 cold/replay
-maximum absolute logit difference of `0.109375`. It is excluded from every v2
-calibration and formal cohort and closes no M2 gate.
+items 1-7. `evidence/m2/PILOT_ATTEMPTS.json` records every current real-GPU
+attempt and its resolution. The latest successful v2 pilot (run06) established
+exact canonical DMA digests, equal greedy tokens, exact A1/A2 repeats, exact
+`G=B1=B2` logits, and a BF16 cold/prefix maximum absolute logit difference of
+`0.109375`. This localizes that numerical difference to the cold-prefill versus
+GPU-prefix execution path; the observed DMA path added no logit difference.
+Every indexed run remains excluded from calibration and formal cohorts and
+closes no M2 gate.
 
 The v2 item-8 gate adds a no-DMA GPU prefix-hit control (`G`) to separate
 prefix-path numerics from transfer effects. It then requires 59 fresh-process

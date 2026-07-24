@@ -1,0 +1,81 @@
+{
+  "schema_version": "dagkv.m2.pilot_attempt_index.v1",
+  "recorded_at_utc": "2026-07-24T18:55:23Z",
+  "runtime_root": "/home/data/25_oyzx/dagkv_runtime",
+  "cohort_eligible": false,
+  "acceptance_claimed": false,
+  "claim_scope": "M2 data-plane protocol validation only; no C1, C2, C3, performance, or item-8 acceptance claim",
+  "attempts": [
+    {
+      "name": "m2_vllm_abba_calibration_20260725_run01",
+      "protocol_schema": "dagkv.m2.vllm_abba.v1",
+      "gate_status": "FAILED",
+      "result_sha256": "f5909fac7483b100dfe5f81171c44329eb81cc68344d0e99d68cb679c44f3252",
+      "failure": "runner timed out while mapping API request IDs to diagnostic terminals",
+      "resolution": "resolved EngineCore request IDs through unique native trace IDs"
+    },
+    {
+      "name": "m2_vllm_abba_calibration_20260725_run02",
+      "protocol_schema": "dagkv.m2.vllm_abba.v1",
+      "gate_status": "FAILED",
+      "result_sha256": "75ea6f59974fe1f360fa7ee3e47762c03441958fc63e98761349f1ef66e163c4",
+      "failure": "D2H diagnostic lookup still used the API producer request ID",
+      "resolution": "bound API and EngineCore request IDs explicitly in execution_ids.json"
+    },
+    {
+      "name": "m2_vllm_abba_calibration_20260725_run03",
+      "protocol_schema": "dagkv.m2.vllm_abba.v1",
+      "gate_status": "CALIBRATED_NOT_ACCEPTED",
+      "result_sha256": "e7dd3bb3e09d8742e7a194a8a706e31104e5757b31529e94a907d455281fca6d",
+      "failure": null,
+      "resolution": "used only to design the v2 G control and tolerance cap"
+    },
+    {
+      "name": "m2_vllm_abba_v2_pilot_20260725_run04",
+      "protocol_schema": "dagkv.m2.vllm_abba.v2",
+      "gate_status": "FAILED",
+      "result_sha256": "93959f7a7591a91eebfdcad0bd4c460ffd90b61744a6e87f92c5a649ed71def9",
+      "failure": "G attempted to consume A1's live GPU allocation under a different lifecycle phase",
+      "resolution": "commit 7653a324f1f45a9eaccb7c038868ffdfacd9b325 assigns A1 and G to lifecycle phase A1_G"
+    },
+    {
+      "name": "m2_vllm_abba_v2_pilot_20260725_run05",
+      "protocol_schema": "dagkv.m2.vllm_abba.v2",
+      "gate_status": "CALIBRATED_NOT_ACCEPTED",
+      "result_sha256": "54d8883e70ed40b9edb0b82aaf9b572e9cb6371d7e19e97ac5d6c578d933ba96",
+      "failure": null,
+      "resolution": "superseded after removing a deprecated environment variable and restoring supported Qwen3 chunked prefill"
+    },
+    {
+      "name": "m2_vllm_abba_v2_pilot_20260725_run06",
+      "protocol_schema": "dagkv.m2.vllm_abba.v2",
+      "gate_status": "CALIBRATED_NOT_ACCEPTED",
+      "result_sha256": "19c5977b531ca766115332eff194a97762008c26d328e848fff9f2c99da5eb6f",
+      "failure": null,
+      "resolution": "candidate protocol validation pilot; excluded before campaign launch"
+    }
+  ],
+  "run06": {
+    "runtime_path": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v2_pilot_20260725_run06",
+    "dagkv_head": "4fef07e6dd35e53b281d66f173cca9eb74c5ae77",
+    "reproducibility_fingerprint": "1ce23f9dd32c882b508fe5e8c94872c35ab327dee72c4a5bee61491963d8d308",
+    "provenance_sha256": "925c0802258c3b7460499adf524773b8e8af644fe9513a126e47dbde950d513e",
+    "sha256sums_sha256": "c4c281d220a5e9252a6920f651e013bd1f9f4595d4980dd1c54092b3aae8e754",
+    "diagnostic_trace_sha256": "8c4bfbd5a5d1f6be3e7287eb45eedf2874ff21fbd218dfe18b6b479c5f4bafc3",
+    "native_trace_sha256": "30d40b03bedf44ff0be773e9ebe8a4c3a9544df8579140f1effb482b114d2b4b",
+    "verified_sha256sums": true,
+    "acceptance_manifest_present": false,
+    "token_id": 932,
+    "minimum_top1_margin": 0.4375,
+    "cold_prefix_max_abs_error": 0.109375,
+    "exact_pairs": [
+      "A1=A2",
+      "G=B1",
+      "G=B2",
+      "B1=B2"
+    ],
+    "dma_jobs": 4,
+    "bytes_per_dma": 2359296,
+    "canonical_digest": "c18a2c102f5afef89d1bd422898626c8a766c00cfeb67610da41ff667172bdc4"
+  }
+}

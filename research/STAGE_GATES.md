@@ -32,10 +32,12 @@ M2 passes only when all conditions below have direct evidence:
    content-addressed and frozen; missing or inconsistent provenance fails
    closed.
 
-Component tests can close items 1-7. Run03 is a pilot and is excluded from the
-59 calibration processes and 20 formal holdouts. Each formal run can emit only
-one holdout-pass manifest. Item 8 closes only after a closed-set aggregator
-verifies 20/20 new holdouts under one frozen tolerance and writes
+Component tests can close items 1-7. Every attempt indexed by
+`evidence/m2/PILOT_ATTEMPTS.json`, plus any protocol-validation execution before
+the formal campaign launch marker, is a pilot excluded from the 59 calibration
+processes and 20 formal holdouts. Each formal run can emit only one holdout-pass
+manifest. Item 8 closes only after a closed-set aggregator verifies 20/20 new
+holdouts under one frozen tolerance and writes
 `M2_ITEM8_ACCEPTANCE_MANIFEST.json`. That manifest does not close aggregate M2;
 M2 remains open until all nine conditions pass.
 
