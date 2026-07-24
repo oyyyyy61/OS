@@ -1,6 +1,6 @@
 {
   "schema_version": "dagkv.m2.pilot_attempt_index.v1",
-  "recorded_at_utc": "2026-07-24T18:55:23Z",
+  "recorded_at_utc": "2026-07-24T19:02:29Z",
   "runtime_root": "/home/data/25_oyzx/dagkv_runtime",
   "cohort_eligible": false,
   "acceptance_claimed": false,
@@ -52,17 +52,26 @@
       "gate_status": "CALIBRATED_NOT_ACCEPTED",
       "result_sha256": "19c5977b531ca766115332eff194a97762008c26d328e848fff9f2c99da5eb6f",
       "failure": null,
-      "resolution": "candidate protocol validation pilot; excluded before campaign launch"
+      "resolution": "superseded by the post-documentation protocol-freeze pilot"
+    },
+    {
+      "name": "m2_vllm_abba_v2_pilot_20260725_run07",
+      "protocol_schema": "dagkv.m2.vllm_abba.v2",
+      "gate_status": "CALIBRATED_NOT_ACCEPTED",
+      "result_sha256": "f307453c36e6cad281d0a9eae6317a66acb9771f87a89ed4b20235ea4cd34c7b",
+      "failure": null,
+      "resolution": "protocol-freeze validation pilot; excluded before campaign launch"
     }
   ],
-  "run06": {
-    "runtime_path": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v2_pilot_20260725_run06",
-    "dagkv_head": "4fef07e6dd35e53b281d66f173cca9eb74c5ae77",
-    "reproducibility_fingerprint": "1ce23f9dd32c882b508fe5e8c94872c35ab327dee72c4a5bee61491963d8d308",
-    "provenance_sha256": "925c0802258c3b7460499adf524773b8e8af644fe9513a126e47dbde950d513e",
-    "sha256sums_sha256": "c4c281d220a5e9252a6920f651e013bd1f9f4595d4980dd1c54092b3aae8e754",
-    "diagnostic_trace_sha256": "8c4bfbd5a5d1f6be3e7287eb45eedf2874ff21fbd218dfe18b6b479c5f4bafc3",
-    "native_trace_sha256": "30d40b03bedf44ff0be773e9ebe8a4c3a9544df8579140f1effb482b114d2b4b",
+  "protocol_freeze_pilot": {
+    "name": "m2_vllm_abba_v2_pilot_20260725_run07",
+    "runtime_path": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v2_pilot_20260725_run07",
+    "dagkv_head": "775d8d994c3a6c673684adf0b410101c851045b7",
+    "reproducibility_fingerprint": "c71d37adb427a652858ff9266f6d509ca685e062db4748268fe802f12a0f099f",
+    "provenance_sha256": "7c661a53a14def0edf5f44aa97cfa65d801956961682cb7d02dee10f2a72b100",
+    "sha256sums_sha256": "7c598c5c7a431a92bd091fb64763039f38dfe608505de30b865495b9330aadd7",
+    "diagnostic_trace_sha256": "f14a7ef6aa7c2db42e2b992b729e271f30d05680dc0f4564817ee0f7f007d8e7",
+    "native_trace_sha256": "bfa2079b88d9bd331e127248e7739a97ccc6d27cf1859e1c0b00f423534b5a36",
     "verified_sha256sums": true,
     "acceptance_manifest_present": false,
     "token_id": 932,
