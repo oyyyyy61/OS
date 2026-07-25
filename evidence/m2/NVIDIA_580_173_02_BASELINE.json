@@ -1,0 +1,73 @@
+{
+  "schema_version": "dagkv.m2.nvidia_runtime_baseline.v1",
+  "recorded_at_utc": "2026-07-25T04:55:03Z",
+  "status": "ENVIRONMENT_VALIDATED_EXCLUDED_FROM_ALL_COHORTS",
+  "boot": {
+    "boot_id": "d92dd761-8c63-4fc1-bd88-49d655995bc1",
+    "booted_at_local": "2026-07-25 12:22:40",
+    "loaded_kernel_module_version": "580.173.02",
+    "disk_kernel_module_version": "580.173.02",
+    "nvidia_smi_driver_version": "580.173.02"
+  },
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 4090",
+    "uuid": "GPU-988a25f8-7e0b-b374-8619-f9dade40cc6a",
+    "memory_total_mib": 24564
+  },
+  "python_runtime": {
+    "executable": "/home/data/25_oyzx/Agentrix/vllm/.venv/bin/python",
+    "torch_version": "2.11.0+cu130",
+    "torch_cuda_version": "13.0"
+  },
+  "transition": {
+    "cause": "unattended-upgrade changed installed NVIDIA packages while the pre-reboot kernel retained 580.159.03",
+    "upgrade_started_at_local": "2026-07-25 06:45:52",
+    "previous_protocol_schema": "dagkv.m2.vllm_abba.v2",
+    "previous_calibration_index": "evidence/m2/CALIBRATION_RESULT_INDEX.json",
+    "previous_calibration_disposition": "historical v2 evidence; ineligible as the parent of a v3 formal campaign",
+    "required_replacement": "fresh excluded v3 pilot, fresh 59-process v3 calibration, and fresh 20-process v3 formal holdout"
+  },
+  "bundle": {
+    "root": "/home/data/25_oyzx/dagkv_runtime/nvidia_58017302_ubuntu_exact_v2",
+    "schema_version": "dagkv.nvidia_driver_userspace_bundle.v2",
+    "manifest_sha256": "5024d87db69d7136e1dc14e33b6cec143c2411c7cf78eb3142a08e0436d602ee",
+    "content_digest": "3a0284cce5cc9a6ff74f6176e8a913d33d195b679ffc5d829c0c3671b55b785c",
+    "runtime_derivation": "dpkg_deb_fsys_tarfile_strip_write_bits_v1",
+    "package_count": 2,
+    "runtime_entry_count": 47,
+    "sealed_root_mode": "0555"
+  },
+  "packages": [
+    {
+      "package": "libnvidia-compute-580",
+      "version": "580.173.02-0ubuntu0.22.04.1",
+      "architecture": "amd64",
+      "repository_filename": "pool/restricted/n/nvidia-graphics-drivers-580/libnvidia-compute-580_580.173.02-0ubuntu0.22.04.1_amd64.deb",
+      "size": 60012044,
+      "sha256": "01327514a8fde543dc092b79016f92a51dc7d72aa59db193c2405bde7d371503"
+    },
+    {
+      "package": "nvidia-utils-580",
+      "version": "580.173.02-0ubuntu0.22.04.1",
+      "architecture": "amd64",
+      "repository_filename": "pool/restricted/n/nvidia-graphics-drivers-580/nvidia-utils-580_580.173.02-0ubuntu0.22.04.1_amd64.deb",
+      "size": 610230,
+      "sha256": "18410c6d9970350c0331f23318cc4ac4cf83a11a9dda8f1a4cc9c66fb53c4764"
+    }
+  ],
+  "runtime_files": {
+    "libcuda.so.580.173.02": "266916dac6c5e7e4655526570cf303a6cc017880d2552960abc66017a7c98cf4",
+    "libnvidia-ml.so.580.173.02": "82d7b58d3f870b0635e8999c56eb8fd2d795c920daa2661e628ca523eee5f557",
+    "nvidia-smi": "22964713c1701fb62b4dd10b26b0dd25d174e100af5bda20c65e0b0fcc32b3be"
+  },
+  "validation": {
+    "archive_union_matches_rootfs": true,
+    "fresh_manifest_replay_passed": true,
+    "bundle_runtime_hashes_match_installed_runtime": true,
+    "cuda_matrix_smoke_passed": true,
+    "mapped_libcuda": "/home/data/25_oyzx/dagkv_runtime/nvidia_58017302_ubuntu_exact_v2/rootfs/usr/lib/x86_64-linux-gnu/libcuda.so.580.173.02",
+    "smoke_is_excluded_from_pilot_calibration_and_formal_cohorts": true
+  },
+  "bundle_validator_commit": "3b2d5b7bc7a5c8dd121b0ea4b1b1fa565e91b120",
+  "claim_scope": "M2 environment and provenance validation only; no item-8 acceptance, aggregate M2 acceptance, performance, C1, C2, C3, or paper result claim"
+}
