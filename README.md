@@ -80,6 +80,19 @@ uv sync --frozen
 .venv/bin/python -m ruff format --check .
 ```
 
+The dependency-free project environment does not install PyTorch or vLLM, so
+the diagnostic adapter contract has a separate CPU-only check under the frozen
+vLLM environment:
+
+```bash
+PYTHONNOUSERSITE=1 \
+PYTHONPATH="$PWD/integrations/vllm_m2" \
+/path/to/vllm/.venv/bin/python -m pytest \
+  integrations/vllm_m2/tests/test_contract.py
+```
+
+Both suites are required before a v3 pilot or campaign launch.
+
 See `research/ARCHITECTURE.md`, `research/M2_RUNTIME_CONTRACT.md`,
 `research/STAGE_GATES.md`, `research/protocols/M2_VLLM_REPLAY_PROTOCOL.md`,
 `research/REFERENCES.md`, and

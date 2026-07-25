@@ -4,13 +4,13 @@ Status: living pre-acceptance index for the v3 evidence protocol, 2026-07-25.
 
 | Gate | Direct component or pilot evidence | Remaining gate-closing evidence |
 | --- | --- | --- |
-| Canonical identities | `test_domain.py`, repository import-boundary AST check | adapter field audit |
+| Canonical identities | `test_domain.py`, repository import-boundary AST check, and the separate `integrations/vllm_m2/tests/test_contract.py` check of GPU allocation-generation capture and exact CPU allocation records against the frozen vLLM API | live engine field binding in the excluded v3 pilot |
 | DAG dependency gate | diamond fanout failure, pending-child bind rejection, orphan-waiter fast-path rejection, ledger node-lifecycle enforcement, mapped-node terminal rejection, and terminal-during-DMA waiter filtering | live workflow adapter |
 | Shared-owner isolation | two-workflow D2H/H2D lifecycle and cross-owner release | live engine requests |
-| Idempotency | duplicate release, lease terminal, transfer terminal, and early-expiry rejection | callback fault injection |
+| Idempotency | duplicate release, lease terminal, transfer terminal, and early-expiry rejection; the diagnostic adapter contract also proves shutdown drain and repeated-shutdown idempotency | live callback fault injection |
 | Historical identity | released `ExecutionRef` ABA rejection, unique mapping activations, ledger ID replay | live delayed-callback injection |
-| Generation safety | failed-target generation consumption and slot checks | live allocator ABA injection |
-| Transfer metadata integrity | component tests cover exact terminal bytes/digests, failed-target no-publish, and cleanup; historical v2 run08 and the historical v2 59/59 calibration independently replayed four exact `2,359,296`-byte DMA terminal pairs; the validator reconciles diagnostic and native ABBA identities, generations, bytes, and digests | one excluded v3 pilot, 59 new v3 calibration traces, and all 20 v3 formal traces under the frozen 580.173.02 fingerprint |
+| Generation safety | failed-target generation consumption and slot checks; the diagnostic adapter contract rejects unallocated GPU generations and missing CPU allocation records | live allocator ABA injection |
+| Transfer metadata integrity | component tests cover exact terminal bytes/digests, failed-target no-publish, cleanup, payload framing, padding exclusion, and adapter-side digest/byte mismatch rejection; historical v2 run08 and the historical v2 59/59 calibration independently replayed four exact `2,359,296`-byte DMA terminal pairs; the validator reconciles diagnostic and native ABBA identities, generations, bytes, and digests | one excluded v3 pilot, 59 new v3 calibration traces, and all 20 v3 formal traces under the frozen 580.173.02 fingerprint |
 | GPU re-admission path | runtime and independent-ledger rejection of direct CPU-only publication, plus successful H2D retry; historical v2 run08 independently replayed fresh GPU target identities and CPU generations 1 then 2 | live adapter API isolation and fresh v3 cohort evidence |
 | H2D coalescing | concurrent eight-waiter single-flight component test | live multi-request batch; policy-scale partial-prefix coalescing remains M3/C3 |
 | Conservation | runtime/ledger reconciliation, cross-family reference replay, event-envelope/parent tamper rejection, dangling-binding rejection, and quiescent audits | quiescent replay of every candidate v3 calibration and holdout trace before acceptance |
@@ -25,3 +25,8 @@ state-isolated repeats inside one engine process; they are not independent
 calibration runs. A single formal execution can produce only a holdout-pass
 record and cannot close item 8. Passing this matrix establishes component
 behavior only; `STAGE_GATES.md` remains the acceptance authority.
+
+The root development suite and the diagnostic adapter contract are separate
+because the root environment deliberately has no PyTorch or vLLM dependency.
+The adapter command is recorded in `README.md`; its CPU-only use of the frozen
+vLLM fork does not replace the required real-engine v3 pilot or cohorts.
