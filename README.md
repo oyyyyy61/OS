@@ -93,6 +93,27 @@ PYTHONPATH="$PWD/integrations/vllm_m2" \
 
 Both suites are required before a v3 pilot or campaign launch.
 
+The current M2 vLLM fork also carries the CPU-side lifecycle implementation used by
+the adapter. Run its complete M2-relevant CPU set separately; the CUDA worker
+tests remain part of the real-GPU gate:
+
+```bash
+cd /path/to/vllm
+PYTHONDONTWRITEBYTECODE=1 \
+HF_HUB_OFFLINE=1 \
+TRANSFORMERS_OFFLINE=1 \
+CUDA_VISIBLE_DEVICES= \
+.venv/bin/python -m pytest -p no:cacheprovider -q \
+  tests/v1/kv_connector/unit/offloading_connector/test_events.py \
+  tests/v1/kv_connector/unit/offloading_connector/test_scheduler.py \
+  tests/v1/kv_connector/unit/offloading_connector/test_worker_metadata.py \
+  tests/v1/kv_offload/cpu/test_manager.py \
+  tests/v1/kv_offload/cpu/test_shared_offload_region.py \
+  tests/v1/kv_offload/test_factory.py \
+  tests/v1/kv_offload/test_fanout_planner.py \
+  tests/v1/kv_offload/test_lifecycle.py
+```
+
 See `research/ARCHITECTURE.md`, `research/M2_RUNTIME_CONTRACT.md`,
 `research/STAGE_GATES.md`, `research/protocols/M2_VLLM_REPLAY_PROTOCOL.md`,
 `research/REFERENCES.md`, and
