@@ -8,6 +8,11 @@ independent replay both passed. The manifest and checksum identities are indexed
 in `evidence/m2/M2_COMPONENT_EVIDENCE_INDEX.json`; this directly supports M2
 items 1-7 and leaves item 8 and aggregate M2 open.
 
+The exact excluded v3 `run09` pilot command, environment, input hashes, and
+no-retry policy are frozen in
+`evidence/m2/M2_V3_PILOT_PREREGISTRATION.json`. Its CUDA capability check and
+execution remain pending until the RTX 4090 has no compute process.
+
 | Gate | Direct component or pilot evidence | Remaining gate-closing evidence |
 | --- | --- | --- |
 | Canonical identities | `test_domain.py`, repository import-boundary AST check, and the separate `integrations/vllm_m2/tests/test_contract.py` check of GPU allocation-generation capture and exact CPU allocation records against the frozen vLLM API | live engine field binding in the excluded v3 pilot |
