@@ -409,7 +409,8 @@ def _parse_distribution_rows(
         )
         rows.append(row)
         names.append(name)
-    require(len(names) == len(set(names)), f"{label} distribution names are ambiguous")
+    # An editable checkout may expose both local egg-info and installed dist-info.
+    # Preserve every source record; sorting makes the multi-source inventory stable.
     expected = sorted(
         rows,
         key=lambda item: (
@@ -422,7 +423,7 @@ def _parse_distribution_rows(
     )
     require(rows == expected, f"{label} distribution inventory is not sorted")
     require(
-        REQUIRED_DISTRIBUTIONS[label].issubset(names),
+        REQUIRED_DISTRIBUTIONS[label].issubset(set(names)),
         f"{label} required distributions are missing",
     )
     return rows

@@ -47,7 +47,9 @@ metadata, the imported vLLM module path and hash, platform identity, exact
 argv, exact child environments, UTC timestamps, stdout, stderr, and JUnit XML.
 Distribution source URLs are hashed inside the child process; evidence stores
 only the canonical SHA-256, editable flag, and URL scheme, so local paths and
-embedded credentials never enter the bundle.
+embedded credentials never enter the bundle. If an editable checkout exposes
+both local `egg-info` and installed `dist-info`, both source records are retained
+and deterministically sorted under the same normalized package name.
 
 ## Evidence Closed Set
 

@@ -26,6 +26,7 @@ from tools.run_m2_component_evidence import (
     _clean_environment,
     _file_entry,
     _git_capture,
+    _parse_distribution_rows,
     _parse_junit,
     _python_entry,
     _seal_permissions,
@@ -321,6 +322,23 @@ def test_distribution_probe_redacts_source_credentials(tmp_path: Path) -> None:
         "source_scheme": "https",
         "version": "1.2",
     }
+    second_source = dict(row)
+    second_source.update(
+        direct_url_sha256=None,
+        editable=False,
+        source_scheme=None,
+    )
+    rows.append(second_source)
+    rows.sort(
+        key=lambda item: (
+            item["name"],
+            item["version"],
+            item["direct_url_sha256"] or "",
+            item["editable"],
+            item["source_scheme"] or "",
+        )
+    )
+    assert len(_parse_distribution_rows(rows, label="dagkv")) == len(rows)
 
 
 def test_failed_creation_has_no_success_seal(tmp_path: Path) -> None:
