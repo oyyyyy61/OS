@@ -2,6 +2,11 @@
 
 Status: living pre-acceptance index for the v3 evidence protocol, 2026-07-25.
 
+The three CPU suites currently pass, and their create-only evidence runner and
+independent replay are implemented. Items 1-7 remain pre-acceptance until a
+clean committed HEAD produces the read-only bundle defined by
+`research/protocols/M2_COMPONENT_EVIDENCE_PROTOCOL.md`.
+
 | Gate | Direct component or pilot evidence | Remaining gate-closing evidence |
 | --- | --- | --- |
 | Canonical identities | `test_domain.py`, repository import-boundary AST check, and the separate `integrations/vllm_m2/tests/test_contract.py` check of GPU allocation-generation capture and exact CPU allocation records against the frozen vLLM API | live engine field binding in the excluded v3 pilot |
@@ -29,6 +34,6 @@ behavior only; `STAGE_GATES.md` remains the acceptance authority.
 The root development suite and the diagnostic adapter contract are separate
 because the root environment deliberately has no PyTorch or vLLM dependency.
 The adapter and frozen-fork CPU commands are recorded in `README.md`. The
-current snapshot passed 256 root tests, 13 diagnostic-adapter tests, and 345
+current snapshot passed 269 root tests, 13 diagnostic-adapter tests, and 345
 current-vLLM CPU tests. These CPU results do not replace the required real-engine
 v3 pilot, CUDA worker path, or cohorts.

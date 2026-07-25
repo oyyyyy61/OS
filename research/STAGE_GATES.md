@@ -36,7 +36,10 @@ M2 passes only when all conditions below have direct evidence:
    content-addressed and frozen; missing or inconsistent provenance fails
    closed.
 
-Component tests can close items 1-7. Every attempt indexed by
+Component tests can close items 1-7 only after the three-suite deterministic
+contract in `research/protocols/M2_COMPONENT_EVIDENCE_PROTOCOL.md` produces a
+create-only, read-only `M2_COMPONENT_EVIDENCE.json` bundle and independent
+replay passes. That bundle cannot close item 8 or aggregate M2. Every attempt indexed by
 `evidence/m2/PILOT_ATTEMPTS.json`, plus any protocol-validation execution before
 the calibration v3 launch marker, is a pilot excluded from the 59 calibration
 processes. Any validation execution before the formal launch marker is excluded

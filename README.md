@@ -114,8 +114,24 @@ CUDA_VISIBLE_DEVICES= \
   tests/v1/kv_offload/test_lifecycle.py
 ```
 
+After committing all component-test changes, seal the three suites into one
+create-only evidence bundle:
+
+```bash
+.venv/bin/python tools/run_m2_component_evidence.py run \
+  --output-dir /absolute/new/m2_component_evidence \
+  --dagkv-python "$PWD/.venv/bin/python" \
+  --vllm-python /path/to/vllm/.venv/bin/python \
+  --vllm-root /path/to/vllm
+```
+
+The bundle independently replays Git snapshots, commands, environments,
+JUnit, and checksums before and after read-only sealing. It supports M2 items
+1-7 component evidence only; the v3 GPU and item-8 gates remain separate.
+
 See `research/ARCHITECTURE.md`, `research/M2_RUNTIME_CONTRACT.md`,
 `research/STAGE_GATES.md`, `research/protocols/M2_VLLM_REPLAY_PROTOCOL.md`,
+`research/protocols/M2_COMPONENT_EVIDENCE_PROTOCOL.md`,
 `research/REFERENCES.md`, and
 `evidence/IMPORT_MANIFEST.json` for the normative boundaries and first-order
 prior-work constraints.
