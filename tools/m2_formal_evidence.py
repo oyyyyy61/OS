@@ -21,16 +21,23 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-CAMPAIGN_SCHEMA = "dagkv.m2.formal_campaign_preregistration.v1"
+from tools.nvidia_driver_userspace_bundle import (  # noqa: E402
+    BundleValidation,
+    NvidiaUserspaceBundleError,
+    validate_bundle,
+)
+
+CAMPAIGN_SCHEMA = "dagkv.m2.formal_campaign_preregistration.v2"
 ATTEMPT_SCHEMA = "dagkv.m2.formal_campaign_attempt.v1"
 FORMAL_PROTOCOL_SCHEMA = "dagkv.m2.formal_campaign.v1"
-DATA_PLANE_PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v2"
-ACCEPTANCE_SCHEMA = "dagkv.m2.item8.acceptance.v1"
-SEAL_SCHEMA = "dagkv.m2.formal_bundle_seal.v1"
+DATA_PLANE_PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v3"
+ACCEPTANCE_SCHEMA = "dagkv.m2.item8.acceptance.v2"
+SEAL_SCHEMA = "dagkv.m2.formal_bundle_seal.v2"
 FORMAL_RUN_COUNT = 20
 RUN_RECORD_COUNT = FORMAL_RUN_COUNT * 2
 FULL_RECORD_COUNT = RUN_RECORD_COUNT + 2
-BASE_LD_LIBRARY_PATH = "/usr/local/cuda/lib64:"
+CUDA_LIBRARY_PATH = "/usr/local/cuda/lib64"
+LOADER_INJECTION_VARIABLES = ("LD_AUDIT", "LD_PRELOAD")
 INTEGRATION_ROOT = REPO_ROOT / "integrations" / "vllm_m2"
 MARKER_SCHEMA = "dagkv.m2.formal_launch_marker.v1"
 LAUNCH_MARKER_REPOSITORY_PATH = "evidence/m2/FORMAL_LAUNCH_MARKER.json"
@@ -71,6 +78,10 @@ PREREGISTRATION_FIELDS = frozenset(
         "selection_rule",
         "expected_implementation_manifest_sha256",
         "expected_reproducibility_fingerprint",
+        "nvidia_userspace_bundle_root",
+        "expected_nvidia_userspace_bundle_manifest_sha256",
+        "expected_nvidia_userspace_bundle_content_digest",
+        "expected_nvidia_driver_version",
         "parent_binding",
         "frozen_files",
         "python_executable",
@@ -102,6 +113,7 @@ FROZEN_FILE_NAMES = frozenset(
         "raw_replay",
         "calibration_evidence",
         "process_supervisor",
+        "nvidia_bundle_validator",
         "frozen_tolerance",
         "calibration_manifest",
     }
@@ -113,6 +125,10 @@ PARENT_BINDING_FIELDS = frozenset(
         "reproducibility_fingerprint",
         "frozen_at_utc",
         "calibration_run_count",
+        "nvidia_userspace_bundle_root",
+        "expected_nvidia_userspace_bundle_manifest_sha256",
+        "expected_nvidia_userspace_bundle_content_digest",
+        "expected_nvidia_driver_version",
     }
 )
 RUN_SUBMITTED_FIELDS = frozenset(
@@ -207,6 +223,10 @@ ACCEPTANCE_FIELDS = frozenset(
         "calibration_manifest_sha256",
         "reproducibility_fingerprint",
         "protocol_sha256",
+        "nvidia_userspace_bundle_root",
+        "nvidia_userspace_bundle_manifest_sha256",
+        "nvidia_userspace_bundle_content_digest",
+        "nvidia_driver_version",
         "runs",
         "statement",
     }
@@ -240,6 +260,10 @@ SEAL_FIELDS = frozenset(
         "frozen_tolerance_sha256",
         "implementation_manifest_sha256",
         "reproducibility_fingerprint",
+        "nvidia_userspace_bundle_root",
+        "nvidia_userspace_bundle_manifest_sha256",
+        "nvidia_userspace_bundle_content_digest",
+        "nvidia_driver_version",
         "execution_binding",
         "dagkv_snapshot_sha256",
         "run_count",
@@ -303,6 +327,7 @@ class FormalBundleValidation:
     frozen_tolerance_sha256: str
     implementation_manifest_sha256: str
     reproducibility_fingerprint: str
+    nvidia_bundle_validation: BundleValidation
     execution_binding: dict[str, str]
     dagkv_snapshot_sha256: str
     ordered_runs: tuple[dict[str, Any], ...]
@@ -530,9 +555,69 @@ def _positive_number(value: Any, *, label: str) -> float:
     return float(value)
 
 
+def _validate_nvidia_bundle_binding(
+    preregistration: Mapping[str, Any],
+) -> BundleValidation:
+    """Independently reconstruct the NVIDIA bundle and live driver binding."""
+
+    injected = [name for name in LOADER_INJECTION_VARIABLES if name in os.environ]
+    require(
+        not injected,
+        f"loader injection environment is forbidden: {','.join(injected)}",
+    )
+    root_value = preregistration.get("nvidia_userspace_bundle_root")
+    require(
+        isinstance(root_value, str) and root_value,
+        "formal NVIDIA userspace bundle root is invalid",
+    )
+    root = Path(root_value)
+    require(root.is_absolute(), "formal NVIDIA userspace bundle root is not absolute")
+    manifest_sha = _lower_sha256(
+        preregistration.get("expected_nvidia_userspace_bundle_manifest_sha256"),
+        label="formal NVIDIA userspace bundle manifest",
+    )
+    content_digest = _lower_sha256(
+        preregistration.get("expected_nvidia_userspace_bundle_content_digest"),
+        label="formal NVIDIA userspace bundle content",
+    )
+    expected_driver = preregistration.get("expected_nvidia_driver_version")
+    require(
+        isinstance(expected_driver, str)
+        and expected_driver
+        and expected_driver.strip() == expected_driver,
+        "formal expected NVIDIA driver version is invalid",
+    )
+    try:
+        validation = validate_bundle(
+            root,
+            expected_manifest_sha256=manifest_sha,
+        )
+    except (NvidiaUserspaceBundleError, OSError) as exc:
+        raise FormalEvidenceError(
+            f"NVIDIA userspace bundle replay failed: {exc}"
+        ) from exc
+    require(
+        validation.manifest_sha256 == manifest_sha,
+        "formal NVIDIA userspace bundle manifest digest drifted",
+    )
+    require(
+        validation.content_digest == content_digest,
+        "formal NVIDIA userspace bundle content digest drifted",
+    )
+    require(
+        validation.kernel_module_version == expected_driver,
+        "formal NVIDIA kernel driver version drifted",
+    )
+    require(
+        validation.runtime.rootfs.parent == root,
+        "formal NVIDIA bundle rootfs binding drifted",
+    )
+    return validation
+
+
 def _validate_execution_freeze(
     preregistration: Mapping[str, Any], *, root: Path
-) -> None:
+) -> BundleValidation:
     """Reconstruct the two commands and environment without trusting the launcher."""
 
     frozen = preregistration["frozen_files"]
@@ -587,6 +672,7 @@ def _validate_execution_freeze(
     ):
         _positive_number(preregistration[field], label=f"formal {field}")
 
+    bundle_validation = _validate_nvidia_bundle_binding(preregistration)
     runner_template = [
         str(python_path),
         str(frozen["runner"]["path"]),
@@ -602,6 +688,14 @@ def _validate_execution_freeze(
         str(model),
         "--vllm-root",
         str(vllm_root),
+        "--expected-nvidia-driver-version",
+        preregistration["expected_nvidia_driver_version"],
+        "--nvidia-userspace-bundle-root",
+        preregistration["nvidia_userspace_bundle_root"],
+        "--expected-nvidia-userspace-bundle-manifest-sha256",
+        preregistration["expected_nvidia_userspace_bundle_manifest_sha256"],
+        "--expected-nvidia-userspace-bundle-content-digest",
+        preregistration["expected_nvidia_userspace_bundle_content_digest"],
         "--cpu-bytes",
         str(cpu_bytes),
         "--timeout-s",
@@ -633,7 +727,7 @@ def _validate_execution_freeze(
     expected_environment = {
         "CUDA_VISIBLE_DEVICES": str(cuda_device),
         "HF_HUB_OFFLINE": "1",
-        "LD_LIBRARY_PATH": BASE_LD_LIBRARY_PATH,
+        "LD_LIBRARY_PATH": (f"{bundle_validation.library_path}:{CUDA_LIBRARY_PATH}"),
         "PYTHONNOUSERSITE": "1",
         "PYTHONPATH": str(INTEGRATION_ROOT),
         "TOKENIZERS_PARALLELISM": "false",
@@ -644,6 +738,7 @@ def _validate_execution_freeze(
         preregistration["environment_overrides"] == expected_environment,
         "formal environment override freeze drifted",
     )
+    return bundle_validation
 
 
 def _validate_execution_binding(
@@ -758,11 +853,59 @@ def _validate_parent(preregistration: Mapping[str, Any]) -> Any:
     return parent
 
 
+def _validate_calibration_nvidia_binding(
+    preregistration: Mapping[str, Any],
+) -> dict[str, str]:
+    """Bind the formal bundle identity to the independently replayed calibration."""
+
+    calibration_path = Path(
+        preregistration["frozen_files"]["calibration_manifest"]["path"]
+    )
+    calibration, _ = _read_json_object(
+        calibration_path,
+        label="calibration manifest for formal NVIDIA binding",
+    )
+    preregistration_name = calibration.get("campaign_preregistration_file")
+    require(
+        preregistration_name == "CAMPAIGN_PREREGISTRATION.json",
+        "calibration preregistration filename drifted",
+    )
+    calibration_preregistration, calibration_preregistration_raw = _read_json_object(
+        calibration_path.parent / preregistration_name,
+        label="calibration preregistration for formal NVIDIA binding",
+    )
+    require(
+        hashlib.sha256(calibration_preregistration_raw).hexdigest()
+        == calibration.get("campaign_preregistration_sha256"),
+        "calibration preregistration hash binding drifted",
+    )
+    binding = {
+        "nvidia_userspace_bundle_root": preregistration["nvidia_userspace_bundle_root"],
+        "expected_nvidia_userspace_bundle_manifest_sha256": preregistration[
+            "expected_nvidia_userspace_bundle_manifest_sha256"
+        ],
+        "expected_nvidia_userspace_bundle_content_digest": preregistration[
+            "expected_nvidia_userspace_bundle_content_digest"
+        ],
+        "expected_nvidia_driver_version": preregistration[
+            "expected_nvidia_driver_version"
+        ],
+    }
+    require(
+        all(
+            calibration_preregistration.get(field) == value
+            for field, value in binding.items()
+        ),
+        "calibration NVIDIA userspace/driver binding differs from formal evidence",
+    )
+    return binding
+
+
 def _validate_preregistration(
     root: Path,
     *,
     expected_preregistration_sha256: str | None,
-) -> tuple[dict[str, Any], str, Any]:
+) -> tuple[dict[str, Any], str, Any, BundleValidation]:
     path = root / PREREGISTRATION_NAME
     preregistration, raw = _read_json_object(path, label="formal preregistration")
     _exact_fields(
@@ -853,7 +996,7 @@ def _validate_preregistration(
         "formal preregistration launch marker path drifted",
     )
     _verify_frozen_files(preregistration)
-    _validate_execution_freeze(preregistration, root=root)
+    bundle_before = _validate_execution_freeze(preregistration, root=root)
     frozen = preregistration["frozen_files"]
     require(
         preregistration["formal_campaign_protocol_sha256"]
@@ -866,6 +1009,7 @@ def _validate_preregistration(
     require(isinstance(parent_binding, dict), "formal parent binding must be an object")
     _exact_fields(parent_binding, PARENT_BINDING_FIELDS, label="formal parent binding")
     parent = _validate_parent(preregistration)
+    calibration_nvidia_binding = _validate_calibration_nvidia_binding(preregistration)
     require(
         parent.calibration_manifest_sha256
         == parent_binding["calibration_manifest_sha256"]
@@ -891,7 +1035,14 @@ def _validate_preregistration(
         == 59,
         "formal parent cohort binding drifted",
     )
-    return preregistration, observed_sha, parent
+    require(
+        all(
+            parent_binding[field] == value
+            for field, value in calibration_nvidia_binding.items()
+        ),
+        "formal parent NVIDIA userspace/driver binding drifted",
+    )
+    return preregistration, observed_sha, parent, bundle_before
 
 
 def _validate_formal_run(run_dir: Path) -> dict[str, Any]:
@@ -1080,6 +1231,17 @@ def _validate_acceptance(
         == preregistration["data_plane_protocol_sha256"],
         "item-8 acceptance frozen binding drifted",
     )
+    require(
+        manifest["nvidia_userspace_bundle_root"]
+        == parent["nvidia_userspace_bundle_root"]
+        and manifest["nvidia_userspace_bundle_manifest_sha256"]
+        == parent["expected_nvidia_userspace_bundle_manifest_sha256"]
+        and manifest["nvidia_userspace_bundle_content_digest"]
+        == parent["expected_nvidia_userspace_bundle_content_digest"]
+        and manifest["nvidia_driver_version"]
+        == parent["expected_nvidia_driver_version"],
+        "item-8 acceptance NVIDIA userspace/driver binding drifted",
+    )
     expected_runs = sorted(
         (
             {
@@ -1125,8 +1287,14 @@ def replay_formal_bundle(
         "formal campaign root is not the exact declared closed set",
     )
     input_inventory = _capture_tree_inventory(root, include_seal=include_seal)
-    preregistration, preregistration_sha, parent = _validate_preregistration(
-        root, expected_preregistration_sha256=expected_preregistration_sha256
+    (
+        preregistration,
+        preregistration_sha,
+        parent,
+        bundle_before,
+    ) = _validate_preregistration(
+        root,
+        expected_preregistration_sha256=expected_preregistration_sha256,
     )
     rows, journal_raw, journal_lines = _read_journal(root / ATTEMPTS_NAME)
     campaign_id = preregistration["campaign_id"]
@@ -1368,6 +1536,27 @@ def replay_formal_bundle(
         "formal acceptance changed during replay",
     )
     _verify_frozen_files(preregistration)
+    require(
+        _validate_parent(preregistration) == parent,
+        "formal parent evidence changed during replay",
+    )
+    require(
+        _validate_calibration_nvidia_binding(preregistration)
+        == {
+            field: preregistration[field]
+            for field in (
+                "nvidia_userspace_bundle_root",
+                "expected_nvidia_userspace_bundle_manifest_sha256",
+                "expected_nvidia_userspace_bundle_content_digest",
+                "expected_nvidia_driver_version",
+            )
+        },
+        "calibration NVIDIA binding changed during formal replay",
+    )
+    require(
+        _validate_nvidia_bundle_binding(preregistration) == bundle_before,
+        "NVIDIA userspace bundle changed during formal evidence replay",
+    )
     return FormalBundleValidation(
         campaign_root=root,
         campaign_id=campaign_id,
@@ -1389,6 +1578,7 @@ def replay_formal_bundle(
         reproducibility_fingerprint=preregistration[
             "expected_reproducibility_fingerprint"
         ],
+        nvidia_bundle_validation=bundle_before,
         execution_binding=execution_binding,
         dagkv_snapshot_sha256=dagkv_snapshot_sha256,
         ordered_runs=tuple(ordered_runs),
@@ -1418,6 +1608,18 @@ def _seal_payload(
         "frozen_tolerance_sha256": validation.frozen_tolerance_sha256,
         "implementation_manifest_sha256": validation.implementation_manifest_sha256,
         "reproducibility_fingerprint": validation.reproducibility_fingerprint,
+        "nvidia_userspace_bundle_root": str(
+            validation.nvidia_bundle_validation.runtime.rootfs.parent
+        ),
+        "nvidia_userspace_bundle_manifest_sha256": (
+            validation.nvidia_bundle_validation.manifest_sha256
+        ),
+        "nvidia_userspace_bundle_content_digest": (
+            validation.nvidia_bundle_validation.content_digest
+        ),
+        "nvidia_driver_version": (
+            validation.nvidia_bundle_validation.kernel_module_version
+        ),
         "execution_binding": dict(validation.execution_binding),
         "dagkv_snapshot_sha256": validation.dagkv_snapshot_sha256,
         "run_count": FORMAL_RUN_COUNT,
@@ -1485,6 +1687,15 @@ def publish_formal_bundle_seal(
     require(
         _sha256_file(root / ACCEPTANCE_NAME) == validation.acceptance_sha256,
         "formal acceptance changed before seal publication",
+    )
+    preregistration, _ = _read_json_object(
+        root / PREREGISTRATION_NAME,
+        label="formal preregistration before seal publication",
+    )
+    require(
+        _validate_nvidia_bundle_binding(preregistration)
+        == validation.nvidia_bundle_validation,
+        "NVIDIA userspace bundle changed before formal seal publication",
     )
     payload = _seal_payload(validation, sealed_at_utc=datetime.now(UTC).isoformat())
     _publish_json_exclusive(destination, payload)

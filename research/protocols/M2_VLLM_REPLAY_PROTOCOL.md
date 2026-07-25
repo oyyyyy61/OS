@@ -1,7 +1,7 @@
-# M2 vLLM KV Replay Evidence Protocol v2
+# M2 vLLM KV Replay Evidence Protocol v3
 
 Status: normative pre-acceptance protocol for M2 item 8. The current runner and
-artifact schemas must conform to every v2 requirement before new calibration
+artifact schemas must conform to every v3 requirement before new calibration
 or formal evidence can count. A single formal execution records only one
 holdout pass. Only the aggregate 20-holdout manifest can close item 8, and the
 aggregate M2 gate remains **OPEN** until all nine conditions in
@@ -42,7 +42,7 @@ run03 numerical pilot, the failed v2 A1/G phase-boundary attempt, and subsequent
 successful v2 validation pilots. Every indexed attempt is excluded from the
 59-run calibration cohort and the 20-run formal holdout cohort.
 
-The latest indexed successful pilot at protocol freeze recorded exact D2H/H2D
+The latest indexed successful v2 pilot recorded exact D2H/H2D
 canonical digests and byte counts, token 932 in all five phases, exact A1/A2,
 exact `G=B1=B2`, and cold/prefix `max_abs_error=0.109375` under BF16. This
 localizes the observed numerical difference to the cold-prefill versus
@@ -57,7 +57,7 @@ promoted into either cohort.
 
 ## Frozen Runtime Profile
 
-The v2 executable must fail closed when a required capability or observation
+The v3 executable must fail closed when a required capability or observation
 is absent.
 
 | Field | Frozen value |
@@ -80,10 +80,42 @@ is absent.
 | CPU allocation | explicit `cpu_bytes_to_use` |
 | Load failure policy | fail |
 | Calibration cap | `atol=0.125`, `rtol=0` |
+| NVIDIA driver baseline | loaded module `580.173.02`; exact Ubuntu userspace bundle required |
 
 `kv_offloading_size` is prohibited. The audited fork derives and can overwrite
 connector settings from that convenience option, which would invalidate the
 external diagnostic path.
+
+## NVIDIA Userspace Bundle Contract
+
+Every v3 process binds one create-only
+`dagkv.nvidia_driver_userspace_bundle.v2` manifest. The current baseline is
+indexed by `evidence/m2/NVIDIA_580_173_02_BASELINE.json`; campaign
+preregistration freezes its absolute root, manifest SHA-256, content digest,
+and expected driver version. The same four values are explicit runner argv
+inputs and must agree across preregistration, argv, per-run provenance,
+independent raw replay, the calibration parent, and every formal run. The
+validator reconstructs both sealed Debian
+packages, streams their data archives, normalizes extracted modes only by
+removing write bits, and proves that their closed union equals the read-only
+`rootfs` tree. It also requires the package version, loaded kernel module,
+bundle SONAME targets, and `nvidia-smi` driver report to agree.
+
+The runner starts with the validated bundle library directory first in
+`LD_LIBRARY_PATH`, invokes the bundle's absolute `nvidia-smi`, rejects
+`LD_PRELOAD` and `LD_AUDIT`, and proves from `/proc/self/maps` that its sole
+mapped `libcuda` resolves to the sealed bundle inode and hash. Fresh bundle
+validation occurs before CUDA initialization and after evidence construction;
+the full mutation-sensitive filesystem snapshot must remain equal. A version,
+digest, inode, path, mapping, or environment mismatch fails the attempt.
+
+The 59-process v2 calibration under driver `580.159.03` remains immutable
+historical evidence. An unattended package upgrade followed by reboot changed
+the loaded driver baseline to `580.173.02`; v3 also closes a provenance gap by
+binding package payloads and actual library mappings. Consequently, no v2
+tolerance or cohort member is eligible as a parent or member of a v3 formal
+campaign. v3 starts with an excluded pilot, then a fresh 59-process calibration
+and 20-process holdout cohort.
 
 ## G Control and ABBA Sequence
 
@@ -177,8 +209,8 @@ never writes `M2_ITEM8_ACCEPTANCE_MANIFEST.json`.
 
 Every cohort member must record and content-address:
 
-- DAGKV commit, full worktree state, protocol, runner, connector, spec, and
-  helper source files;
+- DAGKV HEAD, tracked diff, non-ignored untracked-file archive, protocol,
+  runner, connector, spec, and helper source files;
 - vLLM base commit plus either a clean dedicated commit or a complete binary
   patch and every untracked source file; the recorded Python version and
   compiled extension hashes must resolve any version/HEAD mismatch. Every
@@ -187,21 +219,24 @@ Every cohort member must record and content-address:
   root, vLLM Git root, and imported vLLM module resolve to one source tree;
 - all model configuration, tokenizer, index, and weight files;
 - Python, dependency lock, vLLM, PyTorch, CUDA runtime/toolkit, driver, OS,
-  kernel, attention backend, GPU model, and GPU UUID;
+  kernel, attention backend, GPU model, and GPU UUID; the NVIDIA package,
+  manifest, normalized runtime tree, mapped `libcuda`, and absolute
+  `nvidia-smi` identities are content-addressed separately;
 - exact argv, relevant environment variables, seed, engine parameters,
   connector parameters, prompt, start/end timestamps, and run ID;
 - every raw artifact hash and the parent calibration/tolerance hash where
   applicable.
 
-An unrecorded dirty file, missing model shard hash, source/binary mismatch,
-runtime fingerprint drift, partial trace, duplicate run ID, checksum mismatch,
-or unavailable required field fails the process. Formal runs require one
-identical frozen fingerprint across all 20 holdouts.
+A changed tracked file, an unrecorded non-ignored untracked file, missing model
+shard hash, source/binary mismatch, runtime fingerprint drift, partial trace,
+duplicate run ID, checksum mismatch, or unavailable required field fails the
+process. Git-ignored entries are outside the v3 source snapshot claim. Formal
+runs require one identical frozen fingerprint across all 20 holdouts.
 
 ## Calibration Cohort and Frozen Tolerance
 
 All attempt-index entries and pre-launch validation pilots contribute no
-sample. After the v2 protocol and source are frozen, launch exactly 59
+sample. After the v3 protocol and source are frozen, launch exactly 59
 successful calibration processes. Each process must create a new OS process,
 CUDA context, vLLM engine, run ID, and output directory. Engine reuse across
 samples is prohibited.
@@ -221,28 +256,41 @@ inventory, source/runtime fingerprint, protocol hash, and selection rule.
 
 Campaign launch is a two-stage operation. Preparation creates a brand-new
 campaign root containing only `CAMPAIGN_PREREGISTRATION.json`, fsyncs it, and
-prints its SHA-256. Execution requires that digest explicitly, rejects every
-other pre-existing campaign entry, and revalidates the frozen protocol,
-runner, launcher, aggregator, shared evidence validator, independent raw
-replay validator, Python entry point, model/runtime paths, command template,
-environment, implementation manifest, runtime fingerprint, selection rule,
-and no-retry rule before submitting `run-001`. The preregistration digest can
-therefore be recorded and committed before any GPU process starts.
+prints its SHA-256. Production preregistration uses schema
+`dagkv.m2.calibration_campaign_preregistration.v3`, records the clean
+preparation Git HEAD, and freezes the marker path. Before execution, a direct,
+single-parent child commit must add only
+`evidence/m2/CALIBRATION_V3_LAUNCH_MARKER.json`; the marker binds the campaign,
+preregistration digest, preparation HEAD, timestamp, and calibration-only claim
+scope. Execution requires the preregistration digest explicitly, obtains a
+non-blocking exclusive `flock` on the campaign directory before reading it,
+and holds that lock through aggregate publication and final independent replay.
+It rejects every other pre-existing campaign entry and revalidates the marker
+Git object, frozen protocol, runner, launcher, aggregator, shared evidence
+validator, independent raw replay validator, Python entry point, model/runtime
+paths, command template, environment, implementation manifest, runtime
+fingerprint, selection rule, and no-retry rule before submitting `run-001`.
 
 `ATTEMPTS.jsonl` is append-only. Its calibration prefix contains exactly 118
 fsynced records: one `submitted` and one `terminal` record for each of
 `run-001` through `run-059`, in sequence, with no retry or replacement. Every
-passing terminal binds its positive process ID, zero exit status, process
+submitted record uses schema `dagkv.m2.calibration_campaign_attempt.v2` and
+repeats the preparation HEAD, execution HEAD, marker path, and marker SHA-256
+as one `execution_binding`. Every passing terminal binds its positive process
+ID, zero exit status, process
 start/end timestamps, stdout/stderr size and hash, complete artifact
 inventory, result/provenance/checksum hashes, implementation manifest,
-reproducibility fingerprint, and observed maximum absolute error. The first
+reproducibility fingerprint, DAGKV Git HEAD, DAGKV snapshot SHA-256, and
+observed maximum absolute error. All 59 Git HEAD values must equal the marker
+execution HEAD and all 59 snapshot hashes must be equal. The first
 submission must follow preregistration; every later submission must follow the
 previous terminal. `run-059` terminal permanently seals the prefix by byte
 length, record count, and SHA-256.
 
 The next ledger record is the single aggregator submission. It binds the
 sealed-prefix triple and the exclusive output path
-`M2_CALIBRATION_MANIFEST.json`. After exclusive publication, one aggregator
+`M2_CALIBRATION_MANIFEST.json`, and repeats the execution binding. After
+exclusive publication, one aggregator
 terminal records the manifest and aggregate-log hashes. Its `passed` status is
 the terminal state of the aggregator process and its prospective candidate
 validation; it is not evidence acceptance by itself. The launcher then replays
@@ -255,13 +303,13 @@ calibration record after the sealed prefix, any additional campaign directory,
 any changed log or artifact, or any missing/failed terminal invalidates the
 bundle.
 
-The v2 calibration manifest has this exact evidence shape (digest values are
+The v3 calibration manifest has this exact evidence shape (digest values are
 abbreviated here only for readability):
 
 ```json
 {
-  "schema_version": "dagkv.m2.calibration_cohort.v2",
-  "protocol_schema": "dagkv.m2.vllm_abba.v2",
+  "schema_version": "dagkv.m2.calibration_cohort.v3",
+  "protocol_schema": "dagkv.m2.vllm_abba.v3",
   "campaign_id": "<preregistered campaign ID>",
   "campaign_preregistration_file": "CAMPAIGN_PREREGISTRATION.json",
   "campaign_preregistration_sha256": "<SHA-256>",
@@ -272,6 +320,13 @@ abbreviated here only for readability):
   "protocol_sha256": "<SHA-256>",
   "implementation_manifest_sha256": "<SHA-256>",
   "selection_rule": {"ordered_run_names": ["run-001", "...", "run-059"]},
+  "execution_binding": {
+    "preparation_git_head": "<Git SHA-1>",
+    "execution_git_head": "<Git SHA-1>",
+    "launch_marker_repository_path": "evidence/m2/CALIBRATION_V3_LAUNCH_MARKER.json",
+    "launch_marker_sha256": "<SHA-256>"
+  },
+  "dagkv_snapshot_sha256": "<SHA-256>",
   "pilot_excluded": true,
   "attempt_count": 59,
   "run_count": 59,
@@ -290,7 +345,9 @@ abbreviated here only for readability):
       "result_sha256": "<SHA-256>",
       "provenance_sha256": "<SHA-256>",
       "sha256sums_sha256": "<SHA-256>",
-      "observed_max_abs_error": 0.0
+      "observed_max_abs_error": 0.0,
+      "dagkv_git_head": "<execution Git SHA-1>",
+      "dagkv_snapshot_sha256": "<SHA-256>"
     }
   ]
 }
@@ -326,7 +383,9 @@ the complete upstream bundle: preregistration, ledger prefix and aggregate
 terminal, logs, actual run directories, checksums, manifest mapping, protocol,
 implementation, and fingerprint. The runner also requires its current
 implementation capture to equal the campaign implementation manifest. The
-tolerance file and its Git commit must predate every formal process.
+tolerance and formal consumers replay the historical execution commit directly
+from the journal binding; later Git HEADs do not replace that object identity.
+The tolerance file and its Git commit must predate every formal process.
 Command-line overrides are prohibited.
 
 ## Formal Holdouts and Item-8 Acceptance
@@ -365,7 +424,7 @@ listed in an append-only attempt inventory outside the accepted closed set.
 
 The diagnostic hash reads unpadded payload bytes in canonical KV order. This
 readback is instrumentation cost and is excluded from performance results. The
-v2 cohort estimates repeatability only for one frozen prompt, block size,
+v3 cohort estimates repeatability only for one frozen prompt, block size,
 model, dtype, GPU class, software fingerprint, and protocol. Process-level
 replication does not establish generalization to other prompts, context
 lengths, models, dtypes, accelerators, multiple waiters, partial prefixes,

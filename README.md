@@ -15,7 +15,7 @@ The project is intentionally independent:
 
 ## Current gate
 
-M1 is imported as scoped evidence. M2 is active under the v2 evidence protocol.
+M1 is imported as scoped evidence. M2 is active under the v3 evidence protocol.
 M2 requires a single-process GPU plus CPU-DRAM lifecycle loop with shared-owner
 isolation, idempotent release, generation safety, transfer integrity, no
 use-after-free, and output correctness. Performance mechanisms remain out of
@@ -36,7 +36,7 @@ path; the observed DMA path added no logit difference.
 Every indexed run remains excluded from calibration and formal cohorts and
 closes no M2 gate.
 
-The v2 item-8 gate adds a no-DMA GPU prefix-hit control (`G`) to separate
+The v3 item-8 gate adds a no-DMA GPU prefix-hit control (`G`) to separate
 prefix-path numerics from transfer effects. It then requires 59 fresh-process
 calibration runs under the preregistered cap `atol=0.125, rtol=0`, a frozen
 aggregate calibration manifest and tolerance file, and 20 new fresh-process
@@ -50,11 +50,19 @@ The calibration path now uses a two-stage, no-retry campaign launcher and a
 closed cohort validator. `tools/m2_raw_replay.py` independently reloads the
 five NumPy logit vectors with pickle disabled, recomputes tokens, margins, and
 all seven comparisons, and reconciles the four diagnostic DMA pairs with the
-native lifecycle trace and source-state provenance. The preregistered 59-run
-calibration cohort has now passed with 59 unique run IDs and result hashes,
-zero failures, and `max_abs=0.109375` in every run. Its create-only tolerance
-file freezes `atol=0.125, rtol=0`. This remains pre-acceptance infrastructure:
-the 20-run formal holdout cohort has not yet been executed.
+native lifecycle trace and source-state provenance. Production preparation
+records a clean Git HEAD. Execution requires a direct single-parent commit
+whose only changed path is
+`evidence/m2/CALIBRATION_V3_LAUNCH_MARKER.json`, holds a non-blocking exclusive
+lock on the campaign directory, and repeats one execution binding in every run
+and aggregate submission. All 59 runs must share that Git HEAD and one DAGKV
+snapshot, and the calibration and formal paths must bind the same NVIDIA
+bundle root, manifest, content digest, and driver version.
+
+The earlier v2 cohort passed 59/59 under its historical driver and froze a v2
+tolerance with `atol=0.125, rtol=0`. It cannot supply a v3 parent. The fresh v3
+calibration remains 0/59, no v3 tolerance has been frozen, and the v3 formal
+cohort remains 0/20. This is pre-acceptance infrastructure only.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint

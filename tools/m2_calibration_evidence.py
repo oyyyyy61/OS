@@ -7,25 +7,55 @@ import json
 import math
 import os
 import stat
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v2"
-CAMPAIGN_SCHEMA = "dagkv.m2.calibration_campaign_preregistration.v1"
-ATTEMPT_SCHEMA = "dagkv.m2.calibration_campaign_attempt.v1"
-CALIBRATION_COHORT_SCHEMA = "dagkv.m2.calibration_cohort.v2"
+try:
+    from tools.nvidia_driver_userspace_bundle import (
+        BundleValidation,
+        NvidiaUserspaceBundleError,
+        validate_bundle,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "tools":
+        raise
+    from nvidia_driver_userspace_bundle import (  # type: ignore[no-redef]
+        BundleValidation,
+        NvidiaUserspaceBundleError,
+        validate_bundle,
+    )
+
+PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v3"
+CAMPAIGN_SCHEMA = "dagkv.m2.calibration_campaign_preregistration.v3"
+ATTEMPT_SCHEMA = "dagkv.m2.calibration_campaign_attempt.v2"
+CALIBRATION_COHORT_SCHEMA = "dagkv.m2.calibration_cohort.v3"
 CALIBRATION_RUN_COUNT = 59
 MAX_FORMAL_ATOL = 0.125
 FORMAL_RTOL = 0.0
+CUDA_LIBRARY_PATH = "/usr/local/cuda/lib64"
+LOADER_INJECTION_VARIABLES = ("LD_AUDIT", "LD_PRELOAD")
 
 PREREGISTRATION_NAME = "CAMPAIGN_PREREGISTRATION.json"
 ATTEMPTS_NAME = "ATTEMPTS.jsonl"
 MANIFEST_NAME = "M2_CALIBRATION_MANIFEST.json"
 AGGREGATE_STDOUT_NAME = "aggregate.stdout.log"
 AGGREGATE_STDERR_NAME = "aggregate.stderr.log"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MARKER_SCHEMA = "dagkv.m2.calibration_launch_marker.v1"
+LAUNCH_MARKER_REPOSITORY_PATH = "evidence/m2/CALIBRATION_V3_LAUNCH_MARKER.json"
+MARKER_CLAIM_SCOPE = "M2_CALIBRATION_ONLY_NO_PERFORMANCE_CLAIM"
+EXECUTION_BINDING_FIELDS = frozenset(
+    {
+        "preparation_git_head",
+        "execution_git_head",
+        "launch_marker_repository_path",
+        "launch_marker_sha256",
+    }
+)
 
 PREREGISTRATION_FIELDS = frozenset(
     {
@@ -33,6 +63,8 @@ PREREGISTRATION_FIELDS = frozenset(
         "campaign_id",
         "campaign_root",
         "created_at_utc",
+        "preparation_git_head",
+        "launch_marker_repository_path",
         "protocol_schema",
         "protocol_sha256",
         "expected_runs",
@@ -45,6 +77,10 @@ PREREGISTRATION_FIELDS = frozenset(
         "rtol",
         "expected_implementation_manifest_sha256",
         "expected_reproducibility_fingerprint",
+        "nvidia_userspace_bundle_root",
+        "expected_nvidia_driver_version",
+        "expected_nvidia_userspace_bundle_manifest_sha256",
+        "expected_nvidia_userspace_bundle_content_digest",
         "frozen_files",
         "python_executable",
         "model",
@@ -90,6 +126,7 @@ SUBMITTED_FIELDS = frozenset(
         "stdout",
         "stderr",
         "preregistration_sha256",
+        "execution_binding",
     }
 )
 TERMINAL_FIELDS = frozenset(
@@ -127,6 +164,8 @@ TERMINAL_VALIDATION_FIELDS = frozenset(
         "implementation_manifest_sha256",
         "reproducibility_fingerprint",
         "observed_max_abs_error",
+        "dagkv_git_head",
+        "dagkv_snapshot_sha256",
     }
 )
 AGGREGATE_SUBMITTED_FIELDS = frozenset(
@@ -143,6 +182,7 @@ AGGREGATE_SUBMITTED_FIELDS = frozenset(
         "stderr",
         "preregistration_sha256",
         "calibration_prefix",
+        "execution_binding",
     }
 )
 AGGREGATE_TERMINAL_FIELDS = TERMINAL_FIELDS - {"sequence", "run_name"}
@@ -174,6 +214,8 @@ MANIFEST_FIELDS = frozenset(
         "formal_atol",
         "formal_rtol",
         "reproducibility_fingerprint",
+        "execution_binding",
+        "dagkv_snapshot_sha256",
         "runs",
     }
 )
@@ -187,6 +229,8 @@ MANIFEST_RUN_FIELDS = frozenset(
         "provenance_sha256",
         "sha256sums_sha256",
         "observed_max_abs_error",
+        "dagkv_git_head",
+        "dagkv_snapshot_sha256",
     }
 )
 
@@ -203,6 +247,8 @@ class ValidatedRunLike(Protocol):
     reproducibility_fingerprint: str
     implementation_manifest_sha256: str
     observed_max_abs_error: float
+    dagkv_git_head: str
+    dagkv_snapshot_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +263,8 @@ class EvidenceRun:
     reproducibility_fingerprint: str
     implementation_manifest_sha256: str
     observed_max_abs_error: float
+    dagkv_git_head: str
+    dagkv_snapshot_sha256: str
 
     def manifest_entry(self) -> dict[str, Any]:
         return {
@@ -228,6 +276,8 @@ class EvidenceRun:
             "provenance_sha256": self.provenance_sha256,
             "sha256sums_sha256": self.sha256sums_sha256,
             "observed_max_abs_error": self.observed_max_abs_error,
+            "dagkv_git_head": self.dagkv_git_head,
+            "dagkv_snapshot_sha256": self.dagkv_snapshot_sha256,
         }
 
 
@@ -243,6 +293,12 @@ class CampaignEvidence:
     implementation_manifest_sha256: str
     reproducibility_fingerprint: str
     selection_rule: dict[str, Any]
+    execution_binding: dict[str, str]
+    dagkv_snapshot_sha256: str
+    nvidia_userspace_bundle_root: str
+    nvidia_userspace_bundle_manifest_sha256: str
+    nvidia_userspace_bundle_content_digest: str
+    nvidia_driver_version: str
     runs: tuple[EvidenceRun, ...]
 
     def manifest_payload(self) -> dict[str, Any]:
@@ -259,6 +315,8 @@ class CampaignEvidence:
             "protocol_sha256": self.protocol_sha256,
             "implementation_manifest_sha256": (self.implementation_manifest_sha256),
             "selection_rule": self.selection_rule,
+            "execution_binding": self.execution_binding,
+            "dagkv_snapshot_sha256": self.dagkv_snapshot_sha256,
             "pilot_excluded": True,
             "attempt_count": len(self.runs),
             "run_count": len(self.runs),
@@ -287,6 +345,135 @@ def lower_sha256(value: Any, *, label: str) -> str:
         f"{label} must be a lowercase SHA-256 digest",
     )
     return value
+
+
+def _git_bytes(*arguments: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *arguments],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        stderr = (
+            exc.stderr.decode("utf-8", errors="replace").strip()
+            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr
+            else str(exc)
+        )
+        raise CalibrationEvidenceError(
+            f"Git command failed ({' '.join(arguments)}): {stderr}"
+        ) from exc
+    return completed.stdout
+
+
+def _git_head(value: Any, *, label: str) -> str:
+    require(
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value),
+        f"{label} must be a lowercase SHA-1 Git object ID",
+    )
+    return value
+
+
+def _marker_and_execution_binding(
+    preregistration: Mapping[str, Any],
+    preregistration_sha256: str,
+    candidate: Any,
+) -> dict[str, str]:
+    preparation_head = _git_head(
+        preregistration.get("preparation_git_head"), label="preparation Git HEAD"
+    )
+    require(
+        isinstance(candidate, dict) and set(candidate) == EXECUTION_BINDING_FIELDS,
+        "execution binding fields drifted",
+    )
+    candidate_preparation = _git_head(
+        candidate.get("preparation_git_head"), label="binding preparation Git HEAD"
+    )
+    execution_head = _git_head(
+        candidate.get("execution_git_head"), label="binding execution Git HEAD"
+    )
+    candidate_path = candidate.get("launch_marker_repository_path")
+    candidate_sha256 = lower_sha256(
+        candidate.get("launch_marker_sha256"), label="binding launch marker SHA-256"
+    )
+    require(
+        candidate_preparation == preparation_head
+        and candidate_path == LAUNCH_MARKER_REPOSITORY_PATH,
+        "execution binding preregistration or marker-path drifted",
+    )
+    parents = (
+        _git_bytes("rev-list", "--parents", "-n", "1", execution_head)
+        .decode("ascii")
+        .split()
+    )
+    require(
+        parents == [execution_head, preparation_head],
+        "execution HEAD must be direct child of preparation HEAD",
+    )
+    changed = (
+        _git_bytes("diff-tree", "--no-commit-id", "--name-only", "-r", execution_head)
+        .decode("utf-8")
+        .splitlines()
+    )
+    require(
+        changed == [LAUNCH_MARKER_REPOSITORY_PATH],
+        "execution commit must modify only the calibration launch marker",
+    )
+    committed = _git_bytes(
+        "cat-file", "blob", f"{execution_head}:{LAUNCH_MARKER_REPOSITORY_PATH}"
+    )
+    require(
+        hashlib.sha256(committed).hexdigest() == candidate_sha256,
+        "execution binding launch marker SHA-256 drifted",
+    )
+    try:
+        marker = json.loads(
+            committed.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CalibrationEvidenceError(
+            f"invalid calibration launch marker: {exc}"
+        ) from exc
+    require(isinstance(marker, dict), "calibration launch marker must be an object")
+    required = {
+        "schema_version",
+        "campaign_id",
+        "campaign_root",
+        "campaign_preregistration_sha256",
+        "preparation_git_head",
+        "created_at_utc",
+        "claim_scope",
+    }
+    require(set(marker) == required, "calibration launch marker fields drifted")
+    require(marker.get("schema_version") == MARKER_SCHEMA, "marker schema drifted")
+    require(
+        marker.get("campaign_id") == preregistration.get("campaign_id")
+        and marker.get("campaign_root") == preregistration.get("campaign_root")
+        and marker.get("campaign_preregistration_sha256") == preregistration_sha256
+        and marker.get("preparation_git_head") == preparation_head
+        and marker.get("claim_scope") == MARKER_CLAIM_SCOPE,
+        "calibration launch marker binding drifted",
+    )
+    marker_time = _timestamp(
+        marker.get("created_at_utc"), label="marker created_at_utc"
+    )
+    require(
+        marker_time
+        >= _timestamp(
+            preregistration.get("created_at_utc"), label="campaign created_at_utc"
+        ),
+        "launch marker must postdate preregistration",
+    )
+    return {
+        "preparation_git_head": preparation_head,
+        "execution_git_head": execution_head,
+        "launch_marker_repository_path": LAUNCH_MARKER_REPOSITORY_PATH,
+        "launch_marker_sha256": candidate_sha256,
+    }
 
 
 def _finite_number(value: Any, *, label: str) -> float:
@@ -492,6 +679,14 @@ def _runner_command_template(preregistration: Mapping[str, Any]) -> list[str]:
         preregistration["model"],
         "--vllm-root",
         preregistration["vllm_root"],
+        "--expected-nvidia-driver-version",
+        preregistration["expected_nvidia_driver_version"],
+        "--nvidia-userspace-bundle-root",
+        preregistration["nvidia_userspace_bundle_root"],
+        "--expected-nvidia-userspace-bundle-manifest-sha256",
+        preregistration["expected_nvidia_userspace_bundle_manifest_sha256"],
+        "--expected-nvidia-userspace-bundle-content-digest",
+        preregistration["expected_nvidia_userspace_bundle_content_digest"],
         "--cpu-bytes",
         str(preregistration["cpu_bytes"]),
         "--timeout-s",
@@ -502,9 +697,69 @@ def _runner_command_template(preregistration: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _validate_nvidia_bundle_binding(
+    preregistration: Mapping[str, Any],
+) -> BundleValidation:
+    present = [name for name in LOADER_INJECTION_VARIABLES if name in os.environ]
+    require(
+        not present,
+        f"loader injection environment is forbidden: {','.join(present)}",
+    )
+    root_value = preregistration.get("nvidia_userspace_bundle_root")
+    require(
+        isinstance(root_value, str) and root_value,
+        "NVIDIA userspace bundle root is invalid",
+    )
+    root = Path(root_value)
+    require(root.is_absolute(), "NVIDIA userspace bundle root must be absolute")
+    manifest_sha256 = lower_sha256(
+        preregistration.get("expected_nvidia_userspace_bundle_manifest_sha256"),
+        label="expected NVIDIA userspace bundle manifest SHA-256",
+    )
+    content_digest = lower_sha256(
+        preregistration.get("expected_nvidia_userspace_bundle_content_digest"),
+        label="expected NVIDIA userspace bundle content digest",
+    )
+    expected_driver_version = preregistration.get("expected_nvidia_driver_version")
+    require(
+        isinstance(expected_driver_version, str) and expected_driver_version,
+        "expected NVIDIA driver version is invalid",
+    )
+    try:
+        validation = validate_bundle(
+            root,
+            expected_manifest_sha256=manifest_sha256,
+        )
+    except (NvidiaUserspaceBundleError, OSError) as exc:
+        raise CalibrationEvidenceError(
+            f"NVIDIA userspace bundle validation failed: {exc}"
+        ) from exc
+    require(
+        validation.kernel_module_version == expected_driver_version,
+        "loaded NVIDIA driver version differs from campaign freeze",
+    )
+    require(
+        validation.manifest_sha256 == manifest_sha256,
+        "NVIDIA userspace bundle manifest digest drifted",
+    )
+    require(
+        validation.content_digest == content_digest,
+        "NVIDIA userspace bundle content digest drifted",
+    )
+    require(
+        validation.runtime.rootfs.parent == root,
+        "NVIDIA userspace bundle rootfs binding drifted",
+    )
+    require(
+        ":" not in str(validation.library_path),
+        "NVIDIA bundle library path cannot be represented in LD_LIBRARY_PATH",
+    )
+    return validation
+
+
 def _validate_preregistration(
     campaign_root: Path,
-) -> tuple[dict[str, Any], str, tuple[str, ...]]:
+) -> tuple[dict[str, Any], str, tuple[str, ...], BundleValidation]:
     path = campaign_root / PREREGISTRATION_NAME
     payload, raw = read_json_object(path, label="campaign preregistration")
     require(set(payload) == PREREGISTRATION_FIELDS, "preregistration fields differ")
@@ -521,6 +776,11 @@ def _validate_preregistration(
     require(
         payload.get("protocol_schema") == PROTOCOL_SCHEMA, "protocol schema drifted"
     )
+    require(
+        payload.get("launch_marker_repository_path") == LAUNCH_MARKER_REPOSITORY_PATH,
+        "launch marker path drifted",
+    )
+    _git_head(payload.get("preparation_git_head"), label="preparation Git HEAD")
     require(
         payload.get("expected_runs") == CALIBRATION_RUN_COUNT
         and payload.get("production_run_count") == CALIBRATION_RUN_COUNT
@@ -565,6 +825,7 @@ def _validate_preregistration(
             "aggregator",
             "evidence",
             "raw_replay",
+            "nvidia_bundle_validator",
         },
         "frozen-file labels differ",
     )
@@ -611,11 +872,12 @@ def _validate_preregistration(
         payload.get("runner_command_template") == _runner_command_template(payload),
         "runner command template drifted",
     )
+    bundle_validation = _validate_nvidia_bundle_binding(payload)
     environment = payload.get("environment_overrides")
     expected_environment = {
         "CUDA_VISIBLE_DEVICES": str(payload["cuda_device"]),
         "HF_HUB_OFFLINE": "1",
-        "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:",
+        "LD_LIBRARY_PATH": (f"{bundle_validation.library_path}:{CUDA_LIBRARY_PATH}"),
         "PYTHONNOUSERSITE": "1",
         "PYTHONPATH": str(
             Path(__file__).resolve().parents[1] / "integrations" / "vllm_m2"
@@ -625,7 +887,7 @@ def _validate_preregistration(
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
     }
     require(environment == expected_environment, "runner environment drifted")
-    return payload, hashlib.sha256(raw).hexdigest(), run_names
+    return payload, hashlib.sha256(raw).hexdigest(), run_names, bundle_validation
 
 
 def _actual_artifact_inventory(run_dir: Path) -> list[dict[str, Any]]:
@@ -657,6 +919,58 @@ def _validate_log(value: Any, *, root: Path, expected_name: str, label: str) -> 
     require(hashlib.sha256(raw).hexdigest() == digest, f"{label} SHA-256 drifted")
 
 
+def _validate_run_nvidia_binding(
+    run_dir: Path,
+    *,
+    preregistration: Mapping[str, Any],
+    bundle_validation: BundleValidation,
+) -> None:
+    provenance, _ = read_json_object(
+        run_dir / "provenance.json",
+        label=f"{run_dir.name} provenance",
+    )
+    capture = provenance.get("nvidia_driver_userspace")
+    require(
+        isinstance(capture, dict),
+        f"{run_dir.name} lacks NVIDIA userspace provenance",
+    )
+    expected_scalars = {
+        "root": preregistration["nvidia_userspace_bundle_root"],
+        "expected_driver_version": preregistration["expected_nvidia_driver_version"],
+        "expected_content_digest": preregistration[
+            "expected_nvidia_userspace_bundle_content_digest"
+        ],
+        "kernel_module_version": preregistration["expected_nvidia_driver_version"],
+        "manifest_sha256": preregistration[
+            "expected_nvidia_userspace_bundle_manifest_sha256"
+        ],
+        "content_digest": preregistration[
+            "expected_nvidia_userspace_bundle_content_digest"
+        ],
+    }
+    for field, expected in expected_scalars.items():
+        require(
+            capture.get(field) == expected,
+            f"{run_dir.name} NVIDIA userspace {field} differs from preregistration",
+        )
+    runtime = capture.get("runtime")
+    require(
+        isinstance(runtime, dict),
+        f"{run_dir.name} lacks NVIDIA runtime path provenance",
+    )
+    expected_runtime = {
+        "rootfs": str(bundle_validation.runtime.rootfs),
+        "library_directory": str(bundle_validation.runtime.library_directory),
+        "nvidia_smi": str(bundle_validation.runtime.nvidia_smi),
+        "libcuda": str(bundle_validation.runtime.libcuda),
+        "libnvidia_ml": str(bundle_validation.runtime.libnvidia_ml),
+    }
+    require(
+        all(runtime.get(field) == value for field, value in expected_runtime.items()),
+        f"{run_dir.name} NVIDIA runtime paths differ from preregistration",
+    )
+
+
 def _validate_run_records(
     *,
     campaign_root: Path,
@@ -667,7 +981,9 @@ def _validate_run_records(
     submitted: Any,
     terminal: Any,
     validated: ValidatedRunLike,
+    bundle_validation: BundleValidation,
     not_before: datetime,
+    execution_binding: Mapping[str, Any],
 ) -> tuple[EvidenceRun, datetime]:
     campaign_id = preregistration["campaign_id"]
     attempt_id = f"{campaign_id}:{run_name}"
@@ -729,6 +1045,10 @@ def _validate_run_records(
         submitted.get("preregistration_sha256") == preregistration_sha256,
         f"{run_name} preregistration binding drifted",
     )
+    require(
+        submitted.get("execution_binding") == execution_binding,
+        f"{run_name} execution binding drifted",
+    )
     _validate_log(
         terminal.get("stdout"),
         root=campaign_root,
@@ -759,6 +1079,8 @@ def _validate_run_records(
         "implementation_manifest_sha256": (validated.implementation_manifest_sha256),
         "reproducibility_fingerprint": validated.reproducibility_fingerprint,
         "observed_max_abs_error": validated.observed_max_abs_error,
+        "dagkv_git_head": validated.dagkv_git_head,
+        "dagkv_snapshot_sha256": validated.dagkv_snapshot_sha256,
     }
     require(validation == expected_validation, f"{run_name} validation mapping drifted")
     protocol_copy = run_dir / "protocol.md"
@@ -766,6 +1088,15 @@ def _validate_run_records(
         sha256_file(protocol_copy, label=f"{run_name} protocol")
         == preregistration["protocol_sha256"],
         f"{run_name} protocol copy drifted",
+    )
+    _validate_run_nvidia_binding(
+        run_dir,
+        preregistration=preregistration,
+        bundle_validation=bundle_validation,
+    )
+    require(
+        validated.dagkv_git_head == execution_binding["execution_git_head"],
+        f"{run_name} DAGKV Git HEAD drifted",
     )
     return (
         EvidenceRun(
@@ -779,6 +1110,8 @@ def _validate_run_records(
             reproducibility_fingerprint=validated.reproducibility_fingerprint,
             implementation_manifest_sha256=(validated.implementation_manifest_sha256),
             observed_max_abs_error=validated.observed_max_abs_error,
+            dagkv_git_head=validated.dagkv_git_head,
+            dagkv_snapshot_sha256=validated.dagkv_snapshot_sha256,
         ),
         terminal_at,
     )
@@ -830,6 +1163,7 @@ def _validate_aggregate_submitted(
     preregistration_sha256: str,
     prefix_raw: bytes,
     last_calibration_terminal_at: datetime,
+    execution_binding: Mapping[str, Any],
 ) -> tuple[dict[str, Any], datetime]:
     require(isinstance(record, dict), "aggregate submitted row is invalid")
     require(
@@ -864,6 +1198,10 @@ def _validate_aggregate_submitted(
     require(
         record.get("preregistration_sha256") == preregistration_sha256,
         "aggregate preregistration binding drifted",
+    )
+    require(
+        record.get("execution_binding") == execution_binding,
+        "aggregate execution binding drifted",
     )
     prefix = _validate_prefix(record.get("calibration_prefix"), prefix_raw=prefix_raw)
     return prefix, timestamp
@@ -995,9 +1333,12 @@ def _validate_campaign(
     require(campaign_root.is_dir(), f"campaign directory is missing: {campaign_root}")
     published = manifest is not None
     _validate_root_entries(campaign_root, published=published)
-    preregistration, preregistration_sha256, run_names = _validate_preregistration(
-        campaign_root
-    )
+    (
+        preregistration,
+        preregistration_sha256,
+        run_names,
+        bundle_before,
+    ) = _validate_preregistration(campaign_root)
     attempts_raw = read_stable_bytes(
         campaign_root / ATTEMPTS_NAME,
         label="attempt journal",
@@ -1010,6 +1351,12 @@ def _validate_campaign(
     require(
         len(records) == expected_record_count,
         "attempt journal has an unexpected record count",
+    )
+    require(records and isinstance(records[0], dict), "first attempt row is invalid")
+    execution_binding = _marker_and_execution_binding(
+        preregistration,
+        preregistration_sha256,
+        records[0].get("execution_binding"),
     )
     lines = attempts_raw.splitlines(keepends=True)
     prefix_raw = b"".join(lines[: CALIBRATION_RUN_COUNT * 2])
@@ -1029,7 +1376,9 @@ def _validate_campaign(
             submitted=records[(sequence - 1) * 2],
             terminal=records[(sequence - 1) * 2 + 1],
             validated=validated,
+            bundle_validation=bundle_before,
             not_before=previous_terminal_at,
+            execution_binding=execution_binding,
         )
         evidence_runs.append(evidence_run)
     prefix, aggregate_submitted_at = _validate_aggregate_submitted(
@@ -1039,6 +1388,7 @@ def _validate_campaign(
         preregistration_sha256=preregistration_sha256,
         prefix_raw=prefix_raw,
         last_calibration_terminal_at=previous_terminal_at,
+        execution_binding=execution_binding,
     )
     require(
         all(
@@ -1059,6 +1409,13 @@ def _validate_campaign(
     )
     require(len(fingerprints) == 1, "calibration fingerprints differ")
     require(len(implementations) == 1, "calibration implementations differ")
+    dagkv_heads = {run.dagkv_git_head for run in evidence_runs}
+    dagkv_snapshots = {run.dagkv_snapshot_sha256 for run in evidence_runs}
+    require(
+        dagkv_heads == {execution_binding["execution_git_head"]},
+        "calibration DAGKV Git HEADs differ from execution binding",
+    )
+    require(len(dagkv_snapshots) == 1, "calibration DAGKV snapshots differ")
     fingerprint = next(iter(fingerprints))
     implementation = next(iter(implementations))
     require(
@@ -1080,6 +1437,12 @@ def _validate_campaign(
         implementation_manifest_sha256=implementation,
         reproducibility_fingerprint=fingerprint,
         selection_rule=dict(preregistration["selection_rule"]),
+        execution_binding=execution_binding,
+        dagkv_snapshot_sha256=next(iter(dagkv_snapshots)),
+        nvidia_userspace_bundle_root=str(bundle_before.runtime.rootfs.parent),
+        nvidia_userspace_bundle_manifest_sha256=bundle_before.manifest_sha256,
+        nvidia_userspace_bundle_content_digest=bundle_before.content_digest,
+        nvidia_driver_version=bundle_before.kernel_module_version,
         runs=tuple(evidence_runs),
     )
     if published:
@@ -1097,6 +1460,11 @@ def _validate_campaign(
             manifest=manifest,
             manifest_sha256=manifest_sha256,
         )
+    bundle_after = _validate_nvidia_bundle_binding(preregistration)
+    require(
+        bundle_after == bundle_before,
+        "NVIDIA userspace bundle changed during campaign validation",
+    )
     return evidence
 
 

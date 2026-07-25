@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,11 @@ from tools.m2_formal_evidence import (
     FormalEvidenceError,
     publish_formal_bundle_seal,
     validate_published_formal_bundle,
+)
+from tools.nvidia_driver_userspace_bundle import (
+    BundleValidation,
+    NvidiaUserspaceBundleError,
+    RuntimeMapping,
 )
 from tools.run_m2_formal_campaign import (
     ACCEPTANCE_NAME,
@@ -36,6 +42,7 @@ FINGERPRINT = hashlib.sha256(b"formal-fingerprint").hexdigest()
 PREPARATION_HEAD = "1" * 40
 EXECUTION_HEAD = "2" * 40
 MARKER_SHA256 = hashlib.sha256(b"formal-launch-marker").hexdigest()
+NVIDIA_DRIVER_VERSION = "580.173.02"
 
 
 def _execution_binding() -> dict[str, str]:
@@ -64,6 +71,10 @@ parser.add_argument("--tolerance-file", type=Path, required=True)
 parser.add_argument("--calibration-manifest", type=Path, required=True)
 parser.add_argument("--model", required=True)
 parser.add_argument("--vllm-root", required=True)
+parser.add_argument("--expected-nvidia-driver-version", required=True)
+parser.add_argument("--nvidia-userspace-bundle-root", type=Path, required=True)
+parser.add_argument("--expected-nvidia-userspace-bundle-manifest-sha256", required=True)
+parser.add_argument("--expected-nvidia-userspace-bundle-content-digest", required=True)
 parser.add_argument("--cpu-bytes", required=True)
 parser.add_argument("--timeout-s", required=True)
 parser.add_argument("--cuda-device", required=True)
@@ -73,6 +84,17 @@ assert args.mode == "formal"
 assert args.full_provenance
 assert args.tolerance_file.is_file()
 assert args.calibration_manifest.is_file()
+assert args.expected_nvidia_driver_version == os.environ["FAKE_NVIDIA_DRIVER_VERSION"]
+assert args.nvidia_userspace_bundle_root == Path(os.environ["FAKE_BUNDLE_ROOT"])
+assert args.expected_nvidia_userspace_bundle_manifest_sha256 == os.environ[
+    "FAKE_BUNDLE_MANIFEST_SHA256"
+]
+assert args.expected_nvidia_userspace_bundle_content_digest == os.environ[
+    "FAKE_BUNDLE_CONTENT_DIGEST"
+]
+assert os.environ["LD_LIBRARY_PATH"].split(":", maxsplit=1)[0] == os.environ[
+    "FAKE_BUNDLE_LIBRARY_PATH"
+]
 index = int(args.output_dir.name.removeprefix("run-"))
 mode, _, target = os.environ.get("FAKE_FORMAL_MODE", "success").partition(":")
 selected = bool(target) and index == int(target)
@@ -99,6 +121,10 @@ for name in (
         json.dumps({**payload, "artifact": name}) + "\n", encoding="utf-8"
     )
 print(f"completed {args.output_dir.name}", flush=True)
+if os.environ.get("FAKE_FORMAL_BUNDLE_TAMPER_RUN") == str(index):
+    Path(os.environ["FAKE_BUNDLE_CONTENT_PATH"]).write_text(
+        "tampered during formal run\n", encoding="utf-8"
+    )
 """
 
 FAKE_AGGREGATOR = r"""
@@ -142,8 +168,8 @@ runs = sorted(
     key=lambda row: row["run_id"],
 )
 manifest = {
-    "schema_version": "dagkv.m2.item8.acceptance.v1",
-    "protocol_schema": "dagkv.m2.vllm_abba.v2",
+    "schema_version": "dagkv.m2.item8.acceptance.v2",
+    "protocol_schema": "dagkv.m2.vllm_abba.v3",
     "gate_status": "M2_ITEM8_ACCEPTED",
     "run_count": len(runs),
     "passed_run_count": len(runs),
@@ -156,6 +182,14 @@ manifest = {
     ],
     "reproducibility_fingerprint": prereg["expected_reproducibility_fingerprint"],
     "protocol_sha256": prereg["data_plane_protocol_sha256"],
+    "nvidia_userspace_bundle_root": prereg["nvidia_userspace_bundle_root"],
+    "nvidia_userspace_bundle_manifest_sha256": prereg[
+        "expected_nvidia_userspace_bundle_manifest_sha256"
+    ],
+    "nvidia_userspace_bundle_content_digest": prereg[
+        "expected_nvidia_userspace_bundle_content_digest"
+    ],
+    "nvidia_driver_version": prereg["expected_nvidia_driver_version"],
     "runs": runs,
     "statement": (
         "Exactly twenty frozen M2 item 8 holdouts passed. This closes item 8 "
@@ -165,6 +199,10 @@ manifest = {
     ),
 }
 args.output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+if os.environ.get("FAKE_FORMAL_AGGREGATOR_BUNDLE_TAMPER") == "1":
+    Path(os.environ["FAKE_BUNDLE_CONTENT_PATH"]).write_text(
+        "tampered during formal aggregate\n", encoding="utf-8"
+    )
 """
 
 
@@ -174,6 +212,62 @@ def _sha(path: Path) -> str:
 
 def _write(path: Path, payload: str) -> None:
     path.write_text(payload.lstrip(), encoding="utf-8")
+
+
+def _fake_bundle(root: Path) -> tuple[Path, str, str, Path, Path]:
+    bundle_root = root / "nvidia-bundle"
+    library_path = bundle_root / "rootfs/usr/lib/x86_64-linux-gnu"
+    binary_path = bundle_root / "rootfs/usr/bin"
+    library_path.mkdir(parents=True)
+    binary_path.mkdir(parents=True)
+    manifest_path = bundle_root / "NVIDIA_USERSPACE_BUNDLE_MANIFEST.json"
+    content_path = bundle_root / "fixture-content.bin"
+    manifest_path.write_bytes(b'{"fixture":"nvidia-bundle"}\n')
+    content_path.write_bytes(b"closed fixture content\n")
+    return (
+        bundle_root,
+        hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        hashlib.sha256(content_path.read_bytes()).hexdigest(),
+        library_path,
+        content_path,
+    )
+
+
+def _fake_bundle_validator(
+    bundle_root: Path,
+    *,
+    expected_manifest_sha256: str | None = None,
+    **_: object,
+) -> BundleValidation:
+    root = bundle_root.absolute()
+    manifest_path = root / "NVIDIA_USERSPACE_BUNDLE_MANIFEST.json"
+    content_path = root / "fixture-content.bin"
+    try:
+        manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        content_digest = hashlib.sha256(content_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise NvidiaUserspaceBundleError("fixture bundle is unavailable") from exc
+    if (
+        expected_manifest_sha256 is not None
+        and manifest_sha256 != expected_manifest_sha256
+    ):
+        raise NvidiaUserspaceBundleError("bundle manifest digest differs")
+    runtime_root = root / "rootfs"
+    library_path = runtime_root / "usr/lib/x86_64-linux-gnu"
+    return BundleValidation(
+        manifest={"fixture": "nvidia-bundle"},
+        manifest_sha256=manifest_sha256,
+        content_digest=content_digest,
+        kernel_module_version=NVIDIA_DRIVER_VERSION,
+        stat_snapshot=(),
+        runtime=RuntimeMapping(
+            rootfs=runtime_root,
+            library_directory=library_path,
+            nvidia_smi=runtime_root / "usr/bin/nvidia-smi",
+            libcuda=library_path / f"libcuda.so.{NVIDIA_DRIVER_VERSION}",
+            libnvidia_ml=library_path / f"libnvidia-ml.so.{NVIDIA_DRIVER_VERSION}",
+        ),
+    )
 
 
 def _fake_validation(
@@ -217,13 +311,32 @@ def _config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CampaignConfig:
     tolerance.write_text("{}\n", encoding="utf-8")
     model.mkdir()
     vllm.mkdir()
+    (
+        bundle_root,
+        bundle_manifest_sha256,
+        bundle_content_digest,
+        bundle_library_path,
+        bundle_content_path,
+    ) = _fake_bundle(tmp_path)
     parent = {
         "calibration_manifest_sha256": _sha(calibration),
         "frozen_tolerance_sha256": _sha(tolerance),
         "reproducibility_fingerprint": FINGERPRINT,
         "frozen_at_utc": "2026-07-24T00:00:00+00:00",
         "calibration_run_count": 59,
+        "nvidia_userspace_bundle_root": str(bundle_root),
+        "expected_nvidia_userspace_bundle_manifest_sha256": (bundle_manifest_sha256),
+        "expected_nvidia_userspace_bundle_content_digest": bundle_content_digest,
+        "expected_nvidia_driver_version": NVIDIA_DRIVER_VERSION,
     }
+    monkeypatch.setenv("FAKE_NVIDIA_DRIVER_VERSION", NVIDIA_DRIVER_VERSION)
+    monkeypatch.setenv("FAKE_BUNDLE_ROOT", str(bundle_root))
+    monkeypatch.setenv("FAKE_BUNDLE_MANIFEST_SHA256", bundle_manifest_sha256)
+    monkeypatch.setenv("FAKE_BUNDLE_CONTENT_DIGEST", bundle_content_digest)
+    monkeypatch.setenv("FAKE_BUNDLE_LIBRARY_PATH", str(bundle_library_path))
+    monkeypatch.setenv("FAKE_BUNDLE_CONTENT_PATH", str(bundle_content_path))
+    monkeypatch.setattr(formal_campaign, "validate_bundle", _fake_bundle_validator)
+    monkeypatch.setattr(formal_evidence, "validate_bundle", _fake_bundle_validator)
     monkeypatch.setattr(
         formal_campaign,
         "_current_implementation_manifest_sha256",
@@ -260,12 +373,18 @@ def _config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CampaignConfig:
     monkeypatch.setattr(formal_campaign, "_validate_completed_run", validate_run)
     monkeypatch.setenv("FAKE_FORMAL_MODE", "success")
     monkeypatch.delenv("FAKE_FORMAL_AGGREGATOR_FAIL", raising=False)
+    monkeypatch.delenv("FAKE_FORMAL_BUNDLE_TAMPER_RUN", raising=False)
+    monkeypatch.delenv("FAKE_FORMAL_AGGREGATOR_BUNDLE_TAMPER", raising=False)
     return CampaignConfig(
         campaign_root=tmp_path / "formal-campaign",
         calibration_manifest=calibration,
         frozen_tolerance=tolerance,
         expected_implementation_manifest_sha256=IMPLEMENTATION,
         expected_reproducibility_fingerprint=FINGERPRINT,
+        nvidia_userspace_bundle_root=bundle_root,
+        expected_nvidia_userspace_bundle_manifest_sha256=bundle_manifest_sha256,
+        expected_nvidia_userspace_bundle_content_digest=bundle_content_digest,
+        expected_nvidia_driver_version=NVIDIA_DRIVER_VERSION,
         python_executable=Path(sys.executable),
         runner=runner,
         aggregator=aggregator,
@@ -295,6 +414,42 @@ def test_prepare_then_execute_three_fake_holdouts(
     assert [path.name for path in config.campaign_root.iterdir()] == [
         PREREGISTRATION_NAME
     ]
+    preregistration = json.loads(
+        (config.campaign_root / PREREGISTRATION_NAME).read_text(encoding="utf-8")
+    )
+    assert preregistration["data_plane_protocol_schema"] == ("dagkv.m2.vllm_abba.v3")
+    assert preregistration["nvidia_userspace_bundle_root"] == str(
+        config.nvidia_userspace_bundle_root
+    )
+    assert (
+        preregistration["expected_nvidia_userspace_bundle_manifest_sha256"]
+        == config.expected_nvidia_userspace_bundle_manifest_sha256
+    )
+    assert (
+        preregistration["expected_nvidia_userspace_bundle_content_digest"]
+        == config.expected_nvidia_userspace_bundle_content_digest
+    )
+    assert preregistration["expected_nvidia_driver_version"] == (NVIDIA_DRIVER_VERSION)
+    assert preregistration["parent_binding"]["expected_nvidia_driver_version"] == (
+        NVIDIA_DRIVER_VERSION
+    )
+    command = preregistration["runner_command_template"]
+    assert command[command.index("--expected-nvidia-driver-version") + 1] == (
+        NVIDIA_DRIVER_VERSION
+    )
+    assert command[command.index("--nvidia-userspace-bundle-root") + 1] == str(
+        config.nvidia_userspace_bundle_root
+    )
+    assert (
+        command[command.index("--expected-nvidia-userspace-bundle-manifest-sha256") + 1]
+        == config.expected_nvidia_userspace_bundle_manifest_sha256
+    )
+    assert preregistration["environment_overrides"]["LD_LIBRARY_PATH"] == (
+        f"{config.nvidia_userspace_bundle_root}/rootfs/"
+        "usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64"
+    )
+    assert "LD_PRELOAD" not in preregistration["environment_overrides"]
+    assert "LD_AUDIT" not in preregistration["environment_overrides"]
 
     acceptance = execute_prepared_campaign(
         config.campaign_root, preregistration_sha, _expected_runs=3
@@ -464,6 +619,70 @@ def test_execute_rejects_frozen_runner_drift_before_submission(
     assert not (config.campaign_root / ATTEMPTS_NAME).exists()
 
 
+def test_prepare_rejects_nvidia_driver_version_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(
+        _config(tmp_path, monkeypatch),
+        expected_nvidia_driver_version="580.999.99",
+    )
+
+    with pytest.raises(FormalCampaignError, match="kernel driver version drifted"):
+        prepare_campaign(config, _expected_runs=2)
+
+    assert not config.campaign_root.exists()
+
+
+def test_execute_rejects_bundle_tamper_before_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, monkeypatch)
+    preregistration_sha = prepare_campaign(config, _expected_runs=2)
+    Path(os.environ["FAKE_BUNDLE_CONTENT_PATH"]).write_text(
+        "tampered before execution\n", encoding="utf-8"
+    )
+
+    with pytest.raises(FormalCampaignError, match="content digest drifted"):
+        execute_prepared_campaign(
+            config.campaign_root,
+            preregistration_sha,
+            _expected_runs=2,
+        )
+
+    assert not (config.campaign_root / ATTEMPTS_NAME).exists()
+
+
+def test_post_run_bundle_tamper_is_terminal_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_FORMAL_BUNDLE_TAMPER_RUN", "1")
+
+    with pytest.raises(FormalCampaignError, match="content digest drifted"):
+        run_campaign(config, _expected_runs=2)
+
+    attempts = _attempts(config.campaign_root)
+    assert len(attempts) == 2
+    assert attempts[-1]["run_name"] == "run-001"
+    assert attempts[-1]["status"] == "validation_failed"
+    assert not (config.campaign_root / "run-002").exists()
+
+
+def test_post_aggregate_bundle_tamper_blocks_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_FORMAL_AGGREGATOR_BUNDLE_TAMPER", "1")
+
+    with pytest.raises(FormalCampaignError, match="content digest drifted"):
+        run_campaign(config, _expected_runs=2)
+
+    attempts = _attempts(config.campaign_root)
+    assert len(attempts) == 6
+    assert attempts[-1]["kind"] == "aggregate"
+    assert attempts[-1]["status"] == "validation_failed"
+
+
 def test_aggregation_failure_is_terminal_and_not_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -525,6 +744,19 @@ def _completed_unsealed_production_campaign(
     )
     monkeypatch.setattr(
         formal_evidence,
+        "_validate_calibration_nvidia_binding",
+        lambda preregistration: {
+            field: preregistration[field]
+            for field in (
+                "nvidia_userspace_bundle_root",
+                "expected_nvidia_userspace_bundle_manifest_sha256",
+                "expected_nvidia_userspace_bundle_content_digest",
+                "expected_nvidia_driver_version",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        formal_evidence,
         "_validate_execution_binding",
         lambda binding, **_kwargs: dict(binding),
     )
@@ -563,11 +795,63 @@ def test_formal_evidence_publishes_and_replays_create_only_seal(
     assert len(validation.ordered_runs) == 20
     assert seal["formal_prefix_record_count"] == 40
     assert seal["full_journal_record_count"] == 42
+    assert seal["nvidia_userspace_bundle_root"] == str(
+        config.nvidia_userspace_bundle_root
+    )
+    assert seal["nvidia_userspace_bundle_manifest_sha256"] == (
+        config.expected_nvidia_userspace_bundle_manifest_sha256
+    )
+    assert seal["nvidia_userspace_bundle_content_digest"] == (
+        config.expected_nvidia_userspace_bundle_content_digest
+    )
+    assert seal["nvidia_driver_version"] == NVIDIA_DRIVER_VERSION
     with pytest.raises(FormalEvidenceError, match="already exists"):
         publish_formal_bundle_seal(
             config.campaign_root,
             expected_preregistration_sha256=preregistration_sha,
         )
+
+
+def test_formal_evidence_rejects_nvidia_bundle_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, preregistration_sha = _completed_unsealed_production_campaign(
+        tmp_path, monkeypatch
+    )
+    Path(os.environ["FAKE_BUNDLE_CONTENT_PATH"]).write_text(
+        "tampered before independent replay\n", encoding="utf-8"
+    )
+
+    with pytest.raises(FormalEvidenceError, match="content digest drifted"):
+        publish_formal_bundle_seal(
+            config.campaign_root,
+            expected_preregistration_sha256=preregistration_sha,
+        )
+
+    assert not (config.campaign_root / SEAL_NAME).exists()
+
+
+def test_formal_evidence_rejects_nvidia_driver_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, preregistration_sha = _completed_unsealed_production_campaign(
+        tmp_path, monkeypatch
+    )
+
+    def drift_driver(*args: object, **kwargs: object) -> BundleValidation:
+        return replace(
+            _fake_bundle_validator(*args, **kwargs),
+            kernel_module_version="580.999.99",
+        )
+
+    monkeypatch.setattr(formal_evidence, "validate_bundle", drift_driver)
+    with pytest.raises(FormalEvidenceError, match="kernel driver version drifted"):
+        publish_formal_bundle_seal(
+            config.campaign_root,
+            expected_preregistration_sha256=preregistration_sha,
+        )
+
+    assert not (config.campaign_root / SEAL_NAME).exists()
 
 
 @pytest.mark.parametrize("target", ["journal", "aggregate_log"])

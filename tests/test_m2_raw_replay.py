@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from tests.m2_raw_replay_fixtures import (
+    NVIDIA_KERNEL_VERSION,
     RUN_ID,
     _canonical,
     _reseal,
@@ -31,6 +32,80 @@ def test_replays_complete_raw_bundle(tmp_path: Path) -> None:
     assert validated.run_id == RUN_ID
     assert validated.observed_max_abs_error == pytest.approx(0.1)
     assert validated.minimum_top1_margin == 1.0
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("mapping", "mapped libcuda path differs"),
+        ("argv", "argv NVIDIA bundle root differs"),
+        ("manifest_capture", "NVIDIA manifest SHA differs"),
+        ("manifest_argv", "argv NVIDIA manifest SHA differs"),
+        ("digest", "NVIDIA capture content digests differ"),
+        ("driver_capture", "NVIDIA expected driver version differs"),
+        ("driver_argv", "argv NVIDIA driver version differs"),
+        ("derivation", "NVIDIA runtime derivation differs"),
+        ("symlink_escape", "symlink target escapes rootfs"),
+        ("smi_driver", "system nvidia-smi driver version differs"),
+        ("postflight", "postflight NVIDIA content digest differs"),
+        ("manifest_postflight", "postflight NVIDIA manifest digest differs"),
+    ],
+)
+def test_rejects_resealed_nvidia_bundle_provenance_tampering(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    run_dir = tmp_path / "run"
+    build_raw_run(run_dir)
+    path = run_dir / "provenance.json"
+    provenance = json.loads(path.read_text())
+    if mutation == "mapping":
+        provenance["nvidia_driver_userspace"]["libcuda_mapping"]["resolved_path"] = (
+            f"/host/libcuda.so.{NVIDIA_KERNEL_VERSION}"
+        )
+    elif mutation == "argv":
+        index = provenance["argv"].index("--nvidia-userspace-bundle-root")
+        provenance["argv"][index + 1] = "/fixture/other-bundle"
+    elif mutation == "manifest_capture":
+        provenance["nvidia_driver_userspace"]["expected_manifest_sha256"] = "f" * 64
+    elif mutation == "manifest_argv":
+        index = provenance["argv"].index(
+            "--expected-nvidia-userspace-bundle-manifest-sha256"
+        )
+        provenance["argv"][index + 1] = "f" * 64
+    elif mutation == "digest":
+        provenance["nvidia_driver_userspace"]["content_digest"] = "f" * 64
+    elif mutation == "driver_capture":
+        provenance["nvidia_driver_userspace"]["expected_driver_version"] = "111.222.333"
+    elif mutation == "driver_argv":
+        index = provenance["argv"].index("--expected-nvidia-driver-version")
+        provenance["argv"][index + 1] = "111.222.333"
+    elif mutation == "derivation":
+        provenance["nvidia_driver_userspace"]["manifest"]["runtime_derivation"] = (
+            "untrusted_derivation"
+        )
+    elif mutation == "symlink_escape":
+        runtime = provenance["nvidia_driver_userspace"]["manifest"]["runtime_tree"]
+        symlink = next(
+            item
+            for item in runtime
+            if item["path"] == "usr/lib/x86_64-linux-gnu/libcuda.so.1"
+        )
+        symlink["target"] = "../../../../escape"
+    elif mutation == "smi_driver":
+        provenance["system"]["gpu"]["nvidia_smi"] = (
+            "GPU-fixture, 111.222.333, 00000000:01:00.0, Fixture GPU, 24564"
+        )
+    elif mutation == "manifest_postflight":
+        provenance["postflight"]["nvidia_driver_userspace_manifest_sha256"] = "f" * 64
+    else:
+        provenance["postflight"]["nvidia_driver_userspace_content_digest"] = "f" * 64
+    _write_json(path, provenance)
+    _reseal(run_dir)
+
+    with pytest.raises(M2RawReplayError, match=message):
+        validate_raw_run(run_dir)
 
 
 def test_accepts_reused_prefetch_slot_with_fresh_generation(tmp_path: Path) -> None:

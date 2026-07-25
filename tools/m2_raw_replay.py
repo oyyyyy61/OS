@@ -9,6 +9,7 @@ import importlib
 import json
 import math
 import os
+import re
 import stat
 import sys
 import tarfile
@@ -18,9 +19,59 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v2"
+try:
+    from tools.nvidia_driver_userspace_bundle import (
+        CONTENT_DIGEST_DOMAIN,
+        RUNTIME_DERIVATION,
+    )
+    from tools.nvidia_driver_userspace_bundle import (
+        MANIFEST_FIELDS as NVIDIA_MANIFEST_FIELDS,
+    )
+    from tools.nvidia_driver_userspace_bundle import (
+        MANIFEST_SCHEMA as NVIDIA_MANIFEST_SCHEMA,
+    )
+    from tools.nvidia_driver_userspace_bundle import (
+        PACKAGE_FIELDS as NVIDIA_PACKAGE_FIELDS,
+    )
+    from tools.nvidia_driver_userspace_bundle import (
+        RUNTIME_DIRECTORY_FIELDS as NVIDIA_RUNTIME_DIRECTORY_FIELDS,
+    )
+    from tools.nvidia_driver_userspace_bundle import (
+        RUNTIME_FILE_FIELDS as NVIDIA_RUNTIME_FILE_FIELDS,
+    )
+    from tools.nvidia_driver_userspace_bundle import (
+        RUNTIME_SYMLINK_FIELDS as NVIDIA_RUNTIME_SYMLINK_FIELDS,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "tools":
+        raise
+    from nvidia_driver_userspace_bundle import (  # type: ignore[no-redef]
+        CONTENT_DIGEST_DOMAIN,
+        RUNTIME_DERIVATION,
+    )
+    from nvidia_driver_userspace_bundle import (
+        MANIFEST_FIELDS as NVIDIA_MANIFEST_FIELDS,
+    )
+    from nvidia_driver_userspace_bundle import (
+        MANIFEST_SCHEMA as NVIDIA_MANIFEST_SCHEMA,
+    )
+    from nvidia_driver_userspace_bundle import (
+        PACKAGE_FIELDS as NVIDIA_PACKAGE_FIELDS,
+    )
+    from nvidia_driver_userspace_bundle import (
+        RUNTIME_DIRECTORY_FIELDS as NVIDIA_RUNTIME_DIRECTORY_FIELDS,
+    )
+    from nvidia_driver_userspace_bundle import (
+        RUNTIME_FILE_FIELDS as NVIDIA_RUNTIME_FILE_FIELDS,
+    )
+    from nvidia_driver_userspace_bundle import (
+        RUNTIME_SYMLINK_FIELDS as NVIDIA_RUNTIME_SYMLINK_FIELDS,
+    )
+
+PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v3"
 DIAGNOSTIC_SCHEMA = "dagkv.vllm_m2.transfer_probe.v1"
 LIFECYCLE_SCHEMA = "kv_lifecycle_event_v2"
+NVIDIA_PACKAGE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9+.-]*")
 FROZEN_QWEN3_8B_VOCAB_SIZE = 151_936
 EXPECTED_PHASES = ("A1", "G", "B1", "B2", "A2")
 TOLERANT_PAIRS = (("A1", "G"), ("A1", "B1"), ("A1", "B2"))
@@ -97,6 +148,7 @@ PROVENANCE_FIELDS = frozenset(
         "implementation",
         "mode",
         "model",
+        "nvidia_driver_userspace",
         "postflight",
         "preflight",
         "prompt_token_ids",
@@ -146,10 +198,40 @@ COMPONENT_FIELDS = frozenset(
         "engine_config",
         "implementation_manifest_sha256",
         "model_manifest_sha256",
+        "nvidia_driver_userspace_content_digest",
         "prompt_token_ids",
         "runtime_binary_manifest_sha256",
         "system",
         "vllm_snapshot_sha256",
+    }
+)
+NVIDIA_CAPTURE_FIELDS = frozenset(
+    {
+        "root",
+        "expected_manifest_sha256",
+        "expected_content_digest",
+        "expected_driver_version",
+        "manifest",
+        "manifest_sha256",
+        "content_digest",
+        "kernel_module_version",
+        "runtime",
+        "libcuda_mapping",
+    }
+)
+NVIDIA_RUNTIME_FIELDS = frozenset(
+    {"rootfs", "library_directory", "nvidia_smi", "libcuda", "libnvidia_ml"}
+)
+LIBCUDA_MAPPING_FIELDS = frozenset(
+    {
+        "path",
+        "resolved_path",
+        "rootfs_relative_path",
+        "device",
+        "inode",
+        "size",
+        "sha256",
+        "mapping_count",
     }
 )
 
@@ -274,6 +356,15 @@ def _nonempty_string(value: Any, *, label: str) -> str:
     return value
 
 
+def _driver_version(value: Any, *, label: str) -> str:
+    text = _nonempty_string(value, label=label)
+    require(
+        re.fullmatch(r"[0-9]+(?:\.[0-9]+){2,}", text) is not None,
+        f"{label} must be a dotted numeric NVIDIA driver version",
+    )
+    return text
+
+
 def _finite_number(value: Any, *, label: str) -> float:
     require(type(value) in (int, float), f"{label} must be numeric")
     number = float(value)
@@ -320,6 +411,411 @@ def _timestamp(value: Any, *, label: str) -> datetime:
         raise M2RawReplayError(f"{label} must be ISO 8601") from exc
     require(parsed.tzinfo is not None, f"{label} must include a timezone")
     return parsed.astimezone(UTC)
+
+
+def _argv_option(argv: list[str], name: str) -> str:
+    values: list[str] = []
+    for index, value in enumerate(argv):
+        if value == name:
+            require(index + 1 < len(argv), f"argv option lacks a value: {name}")
+            values.append(argv[index + 1])
+        elif value.startswith(f"{name}="):
+            values.append(value.split("=", maxsplit=1)[1])
+    require(len(values) == 1, f"argv must contain exactly one {name}")
+    return _nonempty_string(values[0], label=f"argv {name}")
+
+
+def _manifest_file_digest(payload: dict[str, Any]) -> str:
+    try:
+        encoded = (
+            json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise M2RawReplayError(f"cannot canonicalize NVIDIA manifest: {exc}") from exc
+    return _sha256_bytes(encoded)
+
+
+def _runtime_symlink_target(path: str, target: str) -> str:
+    target_path = PurePosixPath(target)
+    require(not target_path.is_absolute(), "absolute NVIDIA runtime symlink target")
+    parts = list(PurePosixPath(path).parent.parts)
+    for part in target_path.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            require(parts, "NVIDIA runtime symlink target escapes rootfs")
+            parts.pop()
+            continue
+        parts.append(part)
+    require(parts, "NVIDIA runtime symlink resolves to rootfs")
+    return PurePosixPath(*parts).as_posix()
+
+
+def _validate_runtime_topology(records: dict[str, dict[str, Any]]) -> None:
+    for path, record in records.items():
+        if path == ".":
+            continue
+        parent = PurePosixPath(path).parent.as_posix()
+        if parent == ".":
+            parent = "."
+        require(
+            parent in records and records[parent]["type"] == "directory",
+            f"NVIDIA runtime parent directory is missing: {path}",
+        )
+        if record["type"] != "symlink":
+            continue
+        current = path
+        visited: set[str] = set()
+        while records[current]["type"] == "symlink":
+            require(current not in visited, "cyclic NVIDIA runtime symlink")
+            visited.add(current)
+            current = _runtime_symlink_target(
+                current,
+                records[current]["target"],
+            )
+            require(current in records, "dangling NVIDIA runtime symlink")
+        require(
+            records[current]["type"] == "file",
+            "NVIDIA runtime symlink does not resolve to a regular file",
+        )
+
+
+def _validate_nvidia_manifest(
+    manifest: Any,
+) -> tuple[str, str, dict[str, dict[str, Any]], datetime]:
+    require(isinstance(manifest, dict), "NVIDIA bundle manifest must be an object")
+    require(
+        set(manifest) == NVIDIA_MANIFEST_FIELDS,
+        "NVIDIA bundle manifest fields differ",
+    )
+    require(
+        manifest["schema_version"] == NVIDIA_MANIFEST_SCHEMA,
+        "NVIDIA bundle manifest schema differs",
+    )
+    require(
+        manifest["bundle_type"] == "nvidia_debian_userspace_exact",
+        "NVIDIA bundle type differs",
+    )
+    created = _timestamp(
+        manifest["created_at_utc"], label="NVIDIA bundle created_at_utc"
+    )
+    kernel_version = _driver_version(
+        manifest["kernel_module_version"],
+        label="NVIDIA bundle kernel module version",
+    )
+
+    packages = manifest["packages"]
+    require(isinstance(packages, list) and packages, "NVIDIA package list is empty")
+    package_paths: list[str] = []
+    package_names: set[str] = set()
+    for item in packages:
+        require(
+            isinstance(item, dict) and set(item) == NVIDIA_PACKAGE_FIELDS,
+            "NVIDIA package record fields differ",
+        )
+        path = _safe_relative(item["path"], label="NVIDIA package path")
+        require(Path(path).name == path and path.endswith(".deb"), "unsafe .deb path")
+        package_paths.append(path)
+        name = _nonempty_string(item["package"], label="NVIDIA package name")
+        require(
+            NVIDIA_PACKAGE_TOKEN_RE.fullmatch(name) is not None,
+            "invalid NVIDIA package name",
+        )
+        require(name not in package_names, "duplicate NVIDIA package name")
+        package_names.add(name)
+        version = _nonempty_string(item["version"], label="NVIDIA package version")
+        require(
+            version.isprintable()
+            and not any(character.isspace() for character in version),
+            "invalid NVIDIA package version",
+        )
+        driver_version = version.split(":", maxsplit=1)[-1].split("-", maxsplit=1)[0]
+        require(
+            driver_version == kernel_version,
+            "NVIDIA package and kernel module versions differ",
+        )
+        architecture = _nonempty_string(
+            item["architecture"], label="NVIDIA package architecture"
+        )
+        require(
+            NVIDIA_PACKAGE_TOKEN_RE.fullmatch(architecture) is not None,
+            "invalid NVIDIA package architecture",
+        )
+        mode = _positive_int(item["mode"], label="NVIDIA package mode", allow_zero=True)
+        require(
+            mode <= 0o7777 and mode & 0o222 == 0,
+            "writable or invalid NVIDIA package mode",
+        )
+        _positive_int(item["size"], label="NVIDIA package size")
+        _lower_sha256(item["sha256"], label="NVIDIA package SHA")
+    require(
+        package_paths == sorted(set(package_paths)),
+        "NVIDIA packages are not strictly sorted",
+    )
+    require(
+        _positive_int(manifest["package_count"], label="NVIDIA package count")
+        == len(package_paths),
+        "NVIDIA package count differs",
+    )
+    require(
+        any(name.startswith("libnvidia-compute-") for name in package_names)
+        and any(name.startswith("nvidia-utils-") for name in package_names),
+        "NVIDIA bundle package roles are incomplete",
+    )
+
+    runtime_tree = manifest["runtime_tree"]
+    require(
+        isinstance(runtime_tree, list) and runtime_tree,
+        "NVIDIA runtime tree is empty",
+    )
+    runtime_paths: list[str] = []
+    runtime_records: dict[str, dict[str, Any]] = {}
+    for item in runtime_tree:
+        require(isinstance(item, dict), "NVIDIA runtime entry must be an object")
+        kind = item.get("type")
+        fields = {
+            "directory": NVIDIA_RUNTIME_DIRECTORY_FIELDS,
+            "file": NVIDIA_RUNTIME_FILE_FIELDS,
+            "symlink": NVIDIA_RUNTIME_SYMLINK_FIELDS,
+        }.get(kind)
+        require(
+            fields is not None and set(item) == fields,
+            "NVIDIA runtime fields differ",
+        )
+        path = item.get("path")
+        require(
+            path == "." or _safe_relative(path, label="NVIDIA runtime path") == path,
+            "NVIDIA runtime path differs",
+        )
+        require(path not in runtime_records, "duplicate NVIDIA runtime path")
+        runtime_paths.append(path)
+        runtime_records[path] = item
+        if kind in {"directory", "file"}:
+            mode = _positive_int(
+                item["mode"], label="NVIDIA runtime mode", allow_zero=True
+            )
+            require(mode <= 0o7777 and mode & 0o222 == 0, "writable NVIDIA runtime")
+        if kind == "file":
+            _positive_int(
+                item["size"],
+                label="NVIDIA runtime file size",
+                allow_zero=True,
+            )
+            _lower_sha256(item["sha256"], label="NVIDIA runtime file SHA")
+        elif kind == "symlink":
+            _nonempty_string(item["target"], label="NVIDIA runtime symlink target")
+    require(
+        runtime_paths[0] == "." and runtime_records["."]["type"] == "directory",
+        "NVIDIA runtime root entry is missing",
+    )
+    _validate_runtime_topology(runtime_records)
+    ordering = [
+        () if path == "." else PurePosixPath(path).parts for path in runtime_paths
+    ]
+    require(ordering == sorted(ordering), "NVIDIA runtime tree is not sorted")
+    require(
+        _positive_int(
+            manifest["runtime_entry_count"], label="NVIDIA runtime entry count"
+        )
+        == len(runtime_paths),
+        "NVIDIA runtime entry count differs",
+    )
+    require(
+        manifest["content_digest_algorithm"] == "sha256",
+        "NVIDIA content digest algorithm differs",
+    )
+    require(
+        manifest["runtime_derivation"] == RUNTIME_DERIVATION,
+        "NVIDIA runtime derivation differs",
+    )
+    content_digest = _lower_sha256(
+        manifest["content_digest"], label="NVIDIA content digest"
+    )
+    reconstructed = _canonical_digest(
+        {
+            "domain": CONTENT_DIGEST_DOMAIN,
+            "kernel_module_version": kernel_version,
+            "packages": packages,
+            "runtime_derivation": manifest["runtime_derivation"],
+            "runtime_tree": runtime_tree,
+        }
+    )
+    require(content_digest == reconstructed, "NVIDIA content digest differs")
+    return content_digest, kernel_version, runtime_records, created
+
+
+def _validate_nvidia_driver_userspace(
+    capture: Any,
+    *,
+    argv: list[str],
+    system: dict[str, Any],
+    started: datetime,
+) -> str:
+    require(
+        isinstance(capture, dict) and set(capture) == NVIDIA_CAPTURE_FIELDS,
+        "NVIDIA userspace capture fields differ",
+    )
+    root = _resolved_absolute_path(capture["root"], label="NVIDIA bundle root")
+    content_digest, kernel_version, runtime_records, created = (
+        _validate_nvidia_manifest(capture["manifest"])
+    )
+    require(created <= started, "NVIDIA bundle was created after runner startup")
+    manifest_sha256 = _lower_sha256(
+        capture["manifest_sha256"], label="NVIDIA manifest SHA"
+    )
+    expected_manifest_sha256 = _lower_sha256(
+        capture["expected_manifest_sha256"],
+        label="expected NVIDIA manifest SHA",
+    )
+    require(
+        expected_manifest_sha256
+        == manifest_sha256
+        == _manifest_file_digest(capture["manifest"]),
+        "NVIDIA manifest SHA differs",
+    )
+    expected_digest = _lower_sha256(
+        capture["expected_content_digest"], label="expected NVIDIA content digest"
+    )
+    require(
+        expected_digest == content_digest == capture["content_digest"],
+        "NVIDIA capture content digests differ",
+    )
+    require(
+        _driver_version(
+            capture["expected_driver_version"],
+            label="expected NVIDIA driver version",
+        )
+        == kernel_version,
+        "NVIDIA expected driver version differs",
+    )
+    require(
+        capture["kernel_module_version"] == kernel_version,
+        "NVIDIA capture kernel module version differs",
+    )
+
+    runtime = capture["runtime"]
+    require(
+        isinstance(runtime, dict) and set(runtime) == NVIDIA_RUNTIME_FIELDS,
+        "NVIDIA runtime mapping fields differ",
+    )
+    rootfs = root / "rootfs"
+    library = rootfs / "usr/lib/x86_64-linux-gnu"
+    nvidia_smi = rootfs / "usr/bin/nvidia-smi"
+    libcuda = library / f"libcuda.so.{kernel_version}"
+    libnvidia_ml = library / f"libnvidia-ml.so.{kernel_version}"
+    require(
+        runtime
+        == {
+            "rootfs": str(rootfs),
+            "library_directory": str(library),
+            "nvidia_smi": str(nvidia_smi),
+            "libcuda": str(libcuda),
+            "libnvidia_ml": str(libnvidia_ml),
+        },
+        "NVIDIA runtime absolute paths differ",
+    )
+    required_runtime = {
+        "usr/bin/nvidia-smi": "file",
+        f"usr/lib/x86_64-linux-gnu/libcuda.so.{kernel_version}": "file",
+        "usr/lib/x86_64-linux-gnu/libcuda.so.1": "symlink",
+        "usr/lib/x86_64-linux-gnu/libcuda.so": "symlink",
+        f"usr/lib/x86_64-linux-gnu/libnvidia-ml.so.{kernel_version}": "file",
+        "usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1": "symlink",
+    }
+    for path, kind in required_runtime.items():
+        require(
+            path in runtime_records and runtime_records[path]["type"] == kind,
+            f"NVIDIA runtime binding is missing: {path}",
+        )
+    require(
+        runtime_records["usr/lib/x86_64-linux-gnu/libcuda.so.1"]["target"]
+        == libcuda.name,
+        "libcuda.so.1 target differs",
+    )
+    require(
+        runtime_records["usr/lib/x86_64-linux-gnu/libcuda.so"]["target"]
+        == "libcuda.so.1",
+        "unversioned libcuda target differs",
+    )
+    require(
+        runtime_records["usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1"]["target"]
+        == libnvidia_ml.name,
+        "libnvidia-ml.so.1 target differs",
+    )
+
+    mapping = capture["libcuda_mapping"]
+    require(
+        isinstance(mapping, dict) and set(mapping) == LIBCUDA_MAPPING_FIELDS,
+        "libcuda mapping fields differ",
+    )
+    require(
+        mapping["path"] == str(libcuda)
+        and mapping["resolved_path"] == str(libcuda)
+        and mapping["rootfs_relative_path"] == libcuda.relative_to(rootfs).as_posix(),
+        "mapped libcuda path differs from the bundle",
+    )
+    libcuda_record = runtime_records[mapping["rootfs_relative_path"]]
+    for field in ("device", "inode", "mapping_count"):
+        _positive_int(mapping[field], label=f"libcuda mapping {field}")
+    require(
+        _positive_int(mapping["size"], label="libcuda mapping size")
+        == libcuda_record["size"],
+        "mapped libcuda size differs",
+    )
+    require(
+        _lower_sha256(mapping["sha256"], label="mapped libcuda SHA")
+        == libcuda_record["sha256"],
+        "mapped libcuda SHA differs",
+    )
+
+    require(
+        _resolved_absolute_path(
+            _argv_option(argv, "--nvidia-userspace-bundle-root"),
+            label="argv NVIDIA bundle root",
+        )
+        == root,
+        "argv NVIDIA bundle root differs",
+    )
+    require(
+        _argv_option(argv, "--expected-nvidia-userspace-bundle-manifest-sha256")
+        == expected_manifest_sha256,
+        "argv NVIDIA manifest SHA differs",
+    )
+    require(
+        _argv_option(argv, "--expected-nvidia-userspace-bundle-content-digest")
+        == content_digest,
+        "argv NVIDIA content digest differs",
+    )
+    require(
+        _argv_option(argv, "--expected-nvidia-driver-version") == kernel_version,
+        "argv NVIDIA driver version differs",
+    )
+    gpu = system.get("gpu")
+    require(isinstance(gpu, dict), "system GPU provenance is missing")
+    require(
+        gpu.get("nvidia_smi_executable") == str(nvidia_smi),
+        "system nvidia-smi executable differs",
+    )
+    smi = _nonempty_string(gpu.get("nvidia_smi"), label="system nvidia-smi output")
+    smi_fields = [field.strip() for field in smi.split(",")]
+    require(len(smi_fields) == 5, "system nvidia-smi identity fields differ")
+    require(
+        _driver_version(smi_fields[1], label="system nvidia-smi driver version")
+        == kernel_version,
+        "system nvidia-smi driver version differs",
+    )
+    environment = system.get("environment")
+    require(isinstance(environment, dict), "system environment provenance is missing")
+    require(
+        environment.get("LD_LIBRARY_PATH", "").split(":", maxsplit=1)[0]
+        == str(library),
+        "captured LD_LIBRARY_PATH does not begin with the NVIDIA bundle",
+    )
+    require(
+        all(name not in environment for name in ("LD_AUDIT", "LD_PRELOAD")),
+        "captured loader injection environment is forbidden",
+    )
+    return content_digest
 
 
 def _validate_run_tree(run_dir: Path) -> None:
@@ -461,7 +957,7 @@ def _validate_result_and_logits(
     entries: dict[str, str],
 ) -> tuple[dict[str, Any], float, float]:
     np = _numpy()
-    require(set(result) == RESULT_FIELDS, "result.json fields differ from M2 v2")
+    require(set(result) == RESULT_FIELDS, "result.json fields differ from M2 v3")
     require(result.get("schema_version") == PROTOCOL_SCHEMA, "wrong result schema")
     run_id = _nonempty_string(result.get("run_id"), label="result run_id")
     mode = result.get("mode")
@@ -1466,7 +1962,7 @@ def _validate_provenance(
     run_dir: Path,
     entries: dict[str, str],
 ) -> tuple[str, str]:
-    require(set(provenance) == PROVENANCE_FIELDS, "provenance fields differ from M2 v2")
+    require(set(provenance) == PROVENANCE_FIELDS, "provenance fields differ from M2 v3")
     require(provenance["schema_version"] == PROTOCOL_SCHEMA, "wrong provenance schema")
     require(provenance["run_id"] == result["run_id"], "provenance run_id differs")
     require(provenance["mode"] == result["mode"], "provenance mode differs")
@@ -1608,6 +2104,7 @@ def _validate_provenance(
         "research/imported/RELATED_WORK_MATRIX.md",
         "research/protocols/M2_VLLM_REPLAY_PROTOCOL.md",
         "tools/m2_raw_replay.py",
+        "tools/nvidia_driver_userspace_bundle.py",
         "tools/run_m2_vllm_abba.py",
     ):
         require(
@@ -1749,6 +2246,12 @@ def _validate_provenance(
     require(runtime_root == vllm_root, "runtime and vLLM Git roots differ")
     system = provenance["system"]
     require(isinstance(system, dict) and system, "system provenance is missing")
+    nvidia_content_digest = _validate_nvidia_driver_userspace(
+        provenance["nvidia_driver_userspace"],
+        argv=argv,
+        system=system,
+        started=started,
+    )
     preflight = provenance["preflight"]
     require(
         isinstance(preflight, dict)
@@ -1798,6 +2301,7 @@ def _validate_provenance(
         "model_manifest_sha256": model_sha,
         "runtime_binary_manifest_sha256": runtime_sha,
         "dependency_manifest_sha256": dependency_sha,
+        "nvidia_driver_userspace_content_digest": nvidia_content_digest,
         "system": system,
         "prompt_token_ids": list(range(1000, 1017)),
         "block_size": 16,
@@ -1830,6 +2334,10 @@ def _validate_provenance(
             "dagkv_git_snapshot_sha256",
             "implementation_manifest_sha256",
             "model_file_stats_unchanged",
+            "libcuda_mapping_unchanged",
+            "nvidia_driver_userspace_content_digest",
+            "nvidia_driver_userspace_manifest_sha256",
+            "nvidia_driver_userspace_unchanged",
             "runtime_binary_stats_unchanged",
             "vllm_git_snapshot_sha256",
         },
@@ -1859,6 +2367,24 @@ def _validate_provenance(
     require(
         postflight["runtime_binary_stats_unchanged"] is True,
         "postflight runtime changed",
+    )
+    require(
+        postflight["nvidia_driver_userspace_content_digest"] == nvidia_content_digest,
+        "postflight NVIDIA content digest differs",
+    )
+    require(
+        postflight["nvidia_driver_userspace_manifest_sha256"]
+        == provenance["nvidia_driver_userspace"]["manifest_sha256"]
+        == provenance["nvidia_driver_userspace"]["expected_manifest_sha256"],
+        "postflight NVIDIA manifest digest differs",
+    )
+    require(
+        postflight["nvidia_driver_userspace_unchanged"] is True,
+        "postflight NVIDIA userspace bundle changed",
+    )
+    require(
+        postflight["libcuda_mapping_unchanged"] is True,
+        "postflight libcuda mapping changed",
     )
     return fingerprint, implementation_sha
 

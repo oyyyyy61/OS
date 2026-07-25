@@ -7,9 +7,11 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import tools.m2_calibration_evidence as calibration_evidence_module
 from tests.m2_calibration_fixtures import build_calibration_campaign
 from tools.aggregate_m2_calibration import (
     CALIBRATION_COHORT_SCHEMA,
@@ -48,8 +50,139 @@ def _write_attempt_rows(campaign: Path, rows: list[dict[str, object]]) -> None:
     (campaign / "ATTEMPTS.jsonl").write_text(encoded, encoding="utf-8")
 
 
+def _marker_replay_fixture(
+    tmp_path: Path,
+) -> tuple[dict[str, object], str, dict[str, str]]:
+    preparation = "b" * 40
+    execution = "a" * 40
+    preregistration = {
+        "campaign_id": "m2-calibration-" + "1" * 32,
+        "campaign_root": str(tmp_path / "campaign"),
+        "preparation_git_head": preparation,
+        "created_at_utc": "2026-01-01T00:00:00+00:00",
+    }
+    marker = {
+        "schema_version": "dagkv.m2.calibration_launch_marker.v1",
+        "campaign_id": preregistration["campaign_id"],
+        "campaign_root": preregistration["campaign_root"],
+        "campaign_preregistration_sha256": "d" * 64,
+        "preparation_git_head": preparation,
+        "created_at_utc": "2026-01-01T00:00:01+00:00",
+        "claim_scope": "M2_CALIBRATION_ONLY_NO_PERFORMANCE_CLAIM",
+    }
+    marker_bytes = (
+        json.dumps(marker, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode()
+    binding = {
+        "preparation_git_head": preparation,
+        "execution_git_head": execution,
+        "launch_marker_repository_path": (
+            "evidence/m2/CALIBRATION_V3_LAUNCH_MARKER.json"
+        ),
+        "launch_marker_sha256": hashlib.sha256(marker_bytes).hexdigest(),
+    }
+    return preregistration, marker_bytes.decode(), binding
+
+
+def test_marker_replay_uses_historical_execution_object_not_current_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preregistration, marker_text, binding = _marker_replay_fixture(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def git_bytes(*arguments: str) -> bytes:
+        calls.append(arguments)
+        if arguments[:3] == ("rev-list", "--parents", "-n"):
+            return f"{'a' * 40} {'b' * 40}\n".encode()
+        if arguments[:4] == ("diff-tree", "--no-commit-id", "--name-only", "-r"):
+            return b"evidence/m2/CALIBRATION_V3_LAUNCH_MARKER.json\n"
+        if arguments[0] == "cat-file":
+            return marker_text.encode()
+        if arguments == ("rev-parse", "HEAD"):
+            return ("f" * 40 + "\n").encode()
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(calibration_evidence_module, "_git_bytes", git_bytes)
+    assert (
+        calibration_evidence_module._marker_and_execution_binding(
+            preregistration, "d" * 64, binding
+        )
+        == binding
+    )
+    assert ("rev-parse", "HEAD") not in calls
+
+
+@pytest.mark.parametrize("field", ["execution_git_head", "launch_marker_sha256"])
+def test_marker_replay_rejects_tampered_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    preregistration, marker_text, binding = _marker_replay_fixture(tmp_path)
+    tampered = dict(binding)
+    tampered[field] = "f" * (40 if field.endswith("head") else 64)
+
+    def git_bytes(*arguments: str) -> bytes:
+        if arguments[:3] == ("rev-list", "--parents", "-n"):
+            return f"{'a' * 40} {'b' * 40}\n".encode()
+        if arguments[:4] == ("diff-tree", "--no-commit-id", "--name-only", "-r"):
+            return b"evidence/m2/CALIBRATION_V3_LAUNCH_MARKER.json\n"
+        if arguments[0] == "cat-file":
+            return marker_text.encode()
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(calibration_evidence_module, "_git_bytes", git_bytes)
+    with pytest.raises(CalibrationEvidenceError):
+        calibration_evidence_module._marker_and_execution_binding(
+            preregistration, "d" * 64, tampered
+        )
+
+
+@pytest.mark.parametrize("tamper", ["parent", "diff", "blob"])
+def test_marker_replay_rejects_tampered_historical_git_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    preregistration, marker_text, binding = _marker_replay_fixture(tmp_path)
+
+    def git_bytes(*arguments: str) -> bytes:
+        if arguments[:3] == ("rev-list", "--parents", "-n"):
+            parent = "f" * 40 if tamper == "parent" else "b" * 40
+            return f"{'a' * 40} {parent}\n".encode()
+        if arguments[:4] == ("diff-tree", "--no-commit-id", "--name-only", "-r"):
+            return (
+                b"evidence/m2/extra.json\n"
+                if tamper == "diff"
+                else b"evidence/m2/CALIBRATION_V3_LAUNCH_MARKER.json\n"
+            )
+        if arguments[0] == "cat-file":
+            return ("{}\n" if tamper == "blob" else marker_text).encode()
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(calibration_evidence_module, "_git_bytes", git_bytes)
+    with pytest.raises(CalibrationEvidenceError):
+        calibration_evidence_module._marker_and_execution_binding(
+            preregistration, "d" * 64, binding
+        )
+
+
 def test_aggregates_the_preregistered_59_process_closed_set(tmp_path: Path) -> None:
     fixture = build_calibration_campaign(tmp_path, publish=False)
+    preregistration = json.loads(
+        (fixture.campaign_root / "CAMPAIGN_PREREGISTRATION.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    command = preregistration["runner_command_template"]
+    manifest_option = command.index(
+        "--expected-nvidia-userspace-bundle-manifest-sha256"
+    )
+    assert (
+        command[manifest_option + 1]
+        == (preregistration["expected_nvidia_userspace_bundle_manifest_sha256"])
+    )
 
     manifest = aggregate_campaign(fixture.campaign_root)
 
@@ -98,6 +231,69 @@ def test_aggregates_the_preregistered_59_process_closed_set(tmp_path: Path) -> N
     )
     assert len(evidence.runs) == 59
     assert not list(fixture.campaign_root.glob(".*.tmp"))
+
+
+def test_independent_evidence_binds_each_run_to_preregistered_nvidia_bundle(
+    tmp_path: Path,
+) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    aggregate_campaign(fixture.campaign_root)
+    terminals = {
+        row["run_name"]: row["validation"]
+        for row in _attempt_rows(fixture.campaign_root)
+        if row.get("kind") == "calibration_run" and row.get("event") == "terminal"
+    }
+
+    provenance_path = fixture.campaign_root / "run-001" / "provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    original_root = provenance["nvidia_driver_userspace"]["root"]
+    alternate_root = f"{original_root[:-1]}x"
+    assert len(alternate_root) == len(original_root)
+    provenance["nvidia_driver_userspace"]["root"] = alternate_root
+    provenance_path.write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    def ledger_validator(run_dir: Path) -> SimpleNamespace:
+        return SimpleNamespace(**terminals[run_dir.name])
+
+    with pytest.raises(
+        CalibrationEvidenceError,
+        match="NVIDIA userspace root differs from preregistration",
+    ):
+        validate_published_calibration_candidate(
+            fixture.manifest_path,
+            run_validator=ledger_validator,
+            expected_implementation_manifest_sha256=(
+                fixture.implementation_manifest_sha256
+            ),
+        )
+
+
+def test_rejects_tampered_execution_binding_in_run_journal(tmp_path: Path) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    rows = _attempt_rows(fixture.campaign_root)
+    assert rows[0]["event"] == "submitted"
+    rows[0]["execution_binding"]["execution_git_head"] = "f" * 40
+    _write_attempt_rows(fixture.campaign_root, rows)
+
+    with pytest.raises(CalibrationEvidenceError, match="execution binding"):
+        aggregate_campaign(fixture.campaign_root)
+
+
+def test_rejects_tampered_dagkv_head_or_snapshot_in_completed_run(
+    tmp_path: Path,
+) -> None:
+    fixture = build_calibration_campaign(tmp_path, publish=False)
+    rows = _attempt_rows(fixture.campaign_root)
+    terminal = rows[1]
+    assert terminal["event"] == "terminal"
+    terminal["validation"]["dagkv_git_head"] = "f" * 40
+    _write_attempt_rows(fixture.campaign_root, rows)
+
+    with pytest.raises(CalibrationEvidenceError, match="validation mapping drifted"):
+        aggregate_campaign(fixture.campaign_root)
 
 
 def test_candidate_requires_exactly_119_attempt_records(tmp_path: Path) -> None:

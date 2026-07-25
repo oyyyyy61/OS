@@ -172,6 +172,123 @@ def test_prompt_is_exactly_one_block_plus_one() -> None:
         validate_prompt_tokens([*range(16), -1])
 
 
+def test_rejects_loader_injection_even_when_value_is_empty() -> None:
+    runner_module._reject_loader_injection({"LD_LIBRARY_PATH": "/validated"})
+
+    with pytest.raises(M2ValidationError, match="LD_PRELOAD"):
+        runner_module._reject_loader_injection({"LD_PRELOAD": ""})
+    with pytest.raises(M2ValidationError, match="LD_AUDIT"):
+        runner_module._reject_loader_injection({"LD_AUDIT": "/tmp/audit.so"})
+
+
+def test_nvidia_bundle_validation_binds_digest_and_loader_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = "a" * 64
+    manifest_digest = "c" * 64
+    driver_version = "999.888.777"
+    library = tmp_path / "rootfs/usr/lib/x86_64-linux-gnu"
+    validation = SimpleNamespace(
+        content_digest=digest,
+        manifest_sha256=manifest_digest,
+        kernel_module_version=driver_version,
+        library_path=library,
+    )
+    calls: list[tuple[Path, str]] = []
+
+    def validate_bundle(
+        path: Path, *, expected_manifest_sha256: str
+    ) -> SimpleNamespace:
+        calls.append((path, expected_manifest_sha256))
+        return validation
+
+    monkeypatch.setattr(runner_module, "validate_bundle", validate_bundle)
+    monkeypatch.setenv("LD_LIBRARY_PATH", f"{library}:/usr/local/cuda/lib64")
+
+    assert (
+        runner_module._validate_nvidia_bundle(
+            tmp_path,
+            expected_manifest_sha256=manifest_digest,
+            expected_content_digest=digest,
+            expected_driver_version=driver_version,
+        )
+        is validation
+    )
+    assert calls == [(tmp_path, manifest_digest)]
+    with pytest.raises(M2ValidationError, match="digest differs"):
+        runner_module._validate_nvidia_bundle(
+            tmp_path,
+            expected_manifest_sha256=manifest_digest,
+            expected_content_digest="b" * 64,
+            expected_driver_version=driver_version,
+        )
+    with pytest.raises(M2ValidationError, match="kernel module version differs"):
+        runner_module._validate_nvidia_bundle(
+            tmp_path,
+            expected_manifest_sha256=manifest_digest,
+            expected_content_digest=digest,
+            expected_driver_version="111.222.333",
+        )
+    with pytest.raises(M2ValidationError, match="manifest SHA-256 differs"):
+        runner_module._validate_nvidia_bundle(
+            tmp_path,
+            expected_manifest_sha256="d" * 64,
+            expected_content_digest=digest,
+            expected_driver_version=driver_version,
+        )
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/host/driver")
+    with pytest.raises(M2ValidationError, match="must begin"):
+        runner_module._validate_nvidia_bundle(
+            tmp_path,
+            expected_manifest_sha256=manifest_digest,
+            expected_content_digest=digest,
+            expected_driver_version=driver_version,
+        )
+
+
+def test_loaded_libcuda_mapping_must_resolve_inside_bundle(tmp_path: Path) -> None:
+    driver_version = "999.888.777"
+    rootfs = tmp_path / "rootfs"
+    library = rootfs / "usr/lib/x86_64-linux-gnu"
+    library.mkdir(parents=True)
+    libcuda = library / f"libcuda.so.{driver_version}"
+    libcuda.write_bytes(b"fixture libcuda")
+    observed = libcuda.stat()
+    inode = observed.st_ino
+    device = f"{os.major(observed.st_dev):02x}:{os.minor(observed.st_dev):02x}"
+    maps = tmp_path / "maps"
+    maps.write_text(
+        "\n".join(
+            [
+                f"1000-2000 r--p 00000000 {device} {inode} {libcuda}",
+                f"2000-3000 r-xp 00001000 {device} {inode} {libcuda}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    validation = SimpleNamespace(
+        libcuda_path=libcuda,
+        runtime=SimpleNamespace(rootfs=rootfs),
+    )
+
+    capture = runner_module._capture_loaded_libcuda(validation, maps_path=maps)
+
+    assert capture["resolved_path"] == str(libcuda)
+    assert capture["mapping_count"] == 2
+    assert capture["sha256"] == hashlib.sha256(b"fixture libcuda").hexdigest()
+
+    host = tmp_path / f"host/libcuda.so.{driver_version}"
+    host.parent.mkdir()
+    host.write_bytes(b"host libcuda")
+    maps.write_text(
+        f"1000-2000 r-xp 00000000 {device} {host.stat().st_ino} {host}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(M2ValidationError, match="does not come"):
+        runner_module._capture_loaded_libcuda(validation, maps_path=maps)
+
+
 @pytest.mark.skipif(np is None, reason="NumPy is required for logit helper tests")
 def test_dense_logits_accepts_flat_duplicate_sampled_token() -> None:
     flat = _Flat(

@@ -85,6 +85,8 @@ class ValidatedRun:
     reproducibility_fingerprint: str
     implementation_manifest_sha256: str
     observed_max_abs_error: float
+    dagkv_git_head: str | None
+    dagkv_snapshot_sha256: str
 
 
 def require(condition: bool, message: str) -> None:
@@ -366,7 +368,7 @@ def _validate_result(result: dict[str, Any], *, run_dir: Path) -> tuple[str, flo
 
 def _validate_provenance(
     provenance: dict[str, Any], *, run_id: str, result: dict[str, Any], run_dir: Path
-) -> tuple[str, str]:
+) -> tuple[str, str, str | None, str]:
     require(
         provenance.get("schema_version") == PROTOCOL_SCHEMA,
         f"provenance uses a non-v2 protocol: {run_dir}",
@@ -432,6 +434,14 @@ def _validate_provenance(
     dagkv_digest = _lower_sha256(
         dagkv_git.get("snapshot_sha256"), label=f"DAGKV snapshot in {run_dir}"
     )
+    dagkv_head = dagkv_git.get("head")
+    if dagkv_head is not None:
+        require(
+            isinstance(dagkv_head, str)
+            and len(dagkv_head) == 40
+            and all(character in "0123456789abcdef" for character in dagkv_head),
+            f"DAGKV Git HEAD is invalid in {run_dir}",
+        )
     vllm_digest = _lower_sha256(
         vllm_git.get("snapshot_sha256"), label=f"vLLM snapshot in {run_dir}"
     )
@@ -455,7 +465,7 @@ def _validate_provenance(
         postflight.get("runtime_binary_stats_unchanged") is True,
         f"runtime binaries changed during run: {run_dir}",
     )
-    return fingerprint, implementation_digest
+    return fingerprint, implementation_digest, dagkv_head, dagkv_digest
 
 
 def _validate_run(run_dir: Path) -> ValidatedRun:
@@ -493,11 +503,13 @@ def _validate_run(run_dir: Path) -> ValidatedRun:
             f"{phase} logits hash differs from SHA256SUMS: {run_dir}",
         )
     provenance = _read_json_object(provenance_path, label="provenance.json")
-    fingerprint, implementation_digest = _validate_provenance(
-        provenance,
-        run_id=run_id,
-        result=result,
-        run_dir=run_dir,
+    fingerprint, implementation_digest, dagkv_head, dagkv_snapshot_sha256 = (
+        _validate_provenance(
+            provenance,
+            run_id=run_id,
+            result=result,
+            run_dir=run_dir,
+        )
     )
     try:
         raw = validate_raw_run(run_dir)
@@ -527,6 +539,8 @@ def _validate_run(run_dir: Path) -> ValidatedRun:
         reproducibility_fingerprint=fingerprint,
         implementation_manifest_sha256=implementation_digest,
         observed_max_abs_error=observed_max,
+        dagkv_git_head=dagkv_head,
+        dagkv_snapshot_sha256=dagkv_snapshot_sha256,
     )
 
 

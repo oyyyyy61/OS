@@ -23,10 +23,14 @@ M2 passes only when all conditions below have direct evidence:
 6. one H2D operation can atomically publish every compatible waiter mapping;
 7. workflow completion and injected failure leave no use-after-free path;
    DAG readiness also requires the owning node to be running;
-8. the v2 real-vLLM replay gate passes: a no-DMA GPU prefix-hit control
+8. the v3 real-vLLM replay gate passes: a no-DMA GPU prefix-hit control
    localizes cold/prefix numerics, 59 fresh-process calibrations pass the
    preregistered `atol=0.125, rtol=0` cap, and 20 new formal holdouts pass after
-   the aggregate calibration manifest and tolerance are frozen;
+   the aggregate calibration manifest and tolerance are frozen; production
+   calibration must also bind a clean preparation HEAD to a direct-child,
+   marker-only execution commit, hold one campaign-directory `flock`, repeat
+   the execution binding in every submitted row, and prove one HEAD and DAGKV
+   snapshot across all 59 runs;
 9. source and binary state, model files, environment, protocol, commands,
    attempt inventory, raw traces, reports, and every aggregate input are
    content-addressed and frozen; missing or inconsistent provenance fails
@@ -34,8 +38,9 @@ M2 passes only when all conditions below have direct evidence:
 
 Component tests can close items 1-7. Every attempt indexed by
 `evidence/m2/PILOT_ATTEMPTS.json`, plus any protocol-validation execution before
-the formal campaign launch marker, is a pilot excluded from the 59 calibration
-processes and 20 formal holdouts. Each formal run can emit only one holdout-pass
+the calibration v3 launch marker, is a pilot excluded from the 59 calibration
+processes. Any validation execution before the formal launch marker is excluded
+from the 20 formal holdouts. Each formal run can emit only one holdout-pass
 manifest. Item 8 closes only after a closed-set aggregator verifies 20/20 new
 holdouts under one frozen tolerance and writes
 `M2_ITEM8_ACCEPTANCE_MANIFEST.json`. That manifest does not close aggregate M2;
@@ -48,6 +53,14 @@ covers history-derived TTL and queue-aware retention; PBKV covers dynamic call
 graphs, shared-node future-access aggregation, lifecycle-aware eviction, and
 conservative prefetch. The exact sources and hashes remain frozen in
 `research/REFERENCES.md`.
+
+The prior 59/59 v2 calibration is retained as historical evidence under its
+original driver and implementation fingerprint. The current v3 gate binds the
+exact NVIDIA Debian package payloads, loaded driver `580.173.02`, and actual
+mapped `libcuda`; it therefore requires a new excluded pilot, 59-process
+calibration, frozen tolerance, and 20-process formal cohort. The v3 calibration
+is currently 0/59, the v3 tolerance does not yet exist, and the formal cohort is
+0/20. No v2 sample or tolerance can satisfy item 8 under v3.
 
 ## M3-M6
 

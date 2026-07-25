@@ -48,9 +48,9 @@ except ModuleNotFoundError as exc:
         validate_raw_run,
     )
 
-PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v2"
+PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v3"
 FORMAL_RUN_SCHEMA = "dagkv.m2.item8.formal_run.v1"
-ITEM8_ACCEPTANCE_SCHEMA = "dagkv.m2.item8.acceptance.v1"
+ITEM8_ACCEPTANCE_SCHEMA = "dagkv.m2.item8.acceptance.v2"
 FORMAL_RUN_COUNT = 20
 CALIBRATION_RUN_COUNT = 59
 MAX_FORMAL_ATOL = 0.125
@@ -167,6 +167,7 @@ PROVENANCE_FIELDS = frozenset(
         "runtime_binaries",
         "dependencies",
         "system",
+        "nvidia_driver_userspace",
         "reproducibility_components",
         "reproducibility_fingerprint",
         "engine_config",
@@ -181,6 +182,7 @@ REPRODUCIBILITY_COMPONENT_FIELDS = frozenset(
         "model_manifest_sha256",
         "runtime_binary_manifest_sha256",
         "dependency_manifest_sha256",
+        "nvidia_driver_userspace_content_digest",
         "system",
         "prompt_token_ids",
         "block_size",
@@ -273,6 +275,10 @@ class ValidatedFormalRun:
     reproducibility_fingerprint: str
     protocol_sha256: str
     dagkv_snapshot_sha256: str
+    nvidia_userspace_bundle_root: str
+    nvidia_userspace_bundle_manifest_sha256: str
+    nvidia_userspace_bundle_content_digest: str
+    nvidia_driver_version: str
     input_inventory: tuple[tuple[str, str, tuple[int, int, int, int, int]], ...]
 
 
@@ -285,6 +291,10 @@ class ParentEvidence:
     calibration_run_ids: frozenset[str]
     calibration_inventory: tuple[tuple[str, str, tuple[int, int, int, int, int]], ...]
     tolerance_identity: tuple[int, int, int, int, int]
+    nvidia_userspace_bundle_root: str
+    nvidia_userspace_bundle_manifest_sha256: str
+    nvidia_userspace_bundle_content_digest: str
+    nvidia_driver_version: str
 
 
 def require(condition: bool, message: str) -> None:
@@ -619,7 +629,7 @@ def _validate_result(result: dict[str, Any], *, run_dir: Path) -> str:
     _exact_fields(result, RESULT_FIELDS, label=f"result.json in {run_dir}")
     require(
         result.get("schema_version") == PROTOCOL_SCHEMA,
-        f"formal result uses a non-v2 protocol: {run_dir}",
+        f"formal result uses a non-v3 protocol: {run_dir}",
     )
     require(result.get("mode") == "formal", f"run is not formal: {run_dir}")
     require(
@@ -979,11 +989,22 @@ def _validate_provenance(
     run_id: str,
     result: dict[str, Any],
     run_dir: Path,
-) -> tuple[str, str, str, str, datetime, datetime]:
+) -> tuple[
+    str,
+    str,
+    str,
+    str,
+    datetime,
+    datetime,
+    str,
+    str,
+    str,
+    str,
+]:
     _exact_fields(provenance, PROVENANCE_FIELDS, label=f"provenance.json in {run_dir}")
     require(
         provenance.get("schema_version") == PROTOCOL_SCHEMA,
-        f"formal provenance uses a non-v2 protocol: {run_dir}",
+        f"formal provenance uses a non-v3 protocol: {run_dir}",
     )
     require(provenance.get("mode") == "formal", f"provenance is not formal: {run_dir}")
     require(provenance.get("run_id") == run_id, f"provenance run_id differs: {run_dir}")
@@ -1094,11 +1115,13 @@ def _validate_provenance(
     implementation = provenance.get("implementation")
     dagkv_git = provenance.get("dagkv_git")
     vllm_git = provenance.get("vllm_git")
+    nvidia_userspace = provenance.get("nvidia_driver_userspace")
     postflight = provenance.get("postflight")
     for label, value in (
         ("implementation", implementation),
         ("dagkv_git", dagkv_git),
         ("vllm_git", vllm_git),
+        ("nvidia_driver_userspace", nvidia_userspace),
         ("postflight", postflight),
         ("preflight", provenance.get("preflight")),
         ("system", provenance.get("system")),
@@ -1111,6 +1134,7 @@ def _validate_provenance(
     assert isinstance(implementation, dict)
     assert isinstance(dagkv_git, dict)
     assert isinstance(vllm_git, dict)
+    assert isinstance(nvidia_userspace, dict)
     assert isinstance(postflight, dict)
     _validate_frozen_profile(provenance, run_id=run_id, run_dir=run_dir)
     implementation_sha = _lower_sha256(
@@ -1123,6 +1147,24 @@ def _validate_provenance(
     vllm_snapshot = _lower_sha256(
         vllm_git.get("snapshot_sha256"), label=f"vLLM snapshot in {run_dir}"
     )
+    nvidia_content_digest = _lower_sha256(
+        nvidia_userspace.get("content_digest"),
+        label=f"NVIDIA userspace content digest in {run_dir}",
+    )
+    nvidia_manifest_sha = _lower_sha256(
+        nvidia_userspace.get("manifest_sha256"),
+        label=f"NVIDIA userspace manifest in {run_dir}",
+    )
+    nvidia_root = nvidia_userspace.get("root")
+    require(
+        isinstance(nvidia_root, str) and Path(nvidia_root).is_absolute(),
+        f"NVIDIA userspace bundle root is invalid: {run_dir}",
+    )
+    nvidia_driver_version = nvidia_userspace.get("kernel_module_version")
+    require(
+        isinstance(nvidia_driver_version, str) and nvidia_driver_version,
+        f"NVIDIA driver version is invalid: {run_dir}",
+    )
     require(
         dagkv_git.get("dirty") is False, f"formal DAGKV worktree was dirty: {run_dir}"
     )
@@ -1131,7 +1173,13 @@ def _validate_provenance(
         and postflight.get("dagkv_git_snapshot_sha256") == dagkv_snapshot
         and postflight.get("vllm_git_snapshot_sha256") == vllm_snapshot
         and postflight.get("model_file_stats_unchanged") is True
-        and postflight.get("runtime_binary_stats_unchanged") is True,
+        and postflight.get("runtime_binary_stats_unchanged") is True
+        and postflight.get("nvidia_driver_userspace_content_digest")
+        == nvidia_content_digest
+        and postflight.get("nvidia_driver_userspace_manifest_sha256")
+        == nvidia_manifest_sha
+        and postflight.get("nvidia_driver_userspace_unchanged") is True
+        and postflight.get("libcuda_mapping_unchanged") is True,
         f"postflight provenance differs: {run_dir}",
     )
     _validate_content_manifests(provenance, run_dir=run_dir)
@@ -1154,6 +1202,10 @@ def _validate_provenance(
         and components["runtime_binary_manifest_sha256"] == runtime_sha
         and components["dependency_manifest_sha256"] == dependency_sha,
         f"reproducibility component hashes differ from provenance: {run_dir}",
+    )
+    require(
+        components["nvidia_driver_userspace_content_digest"] == nvidia_content_digest,
+        f"NVIDIA reproducibility component differs from provenance: {run_dir}",
     )
     require(
         components["system"] == provenance["system"]
@@ -1183,6 +1235,10 @@ def _validate_provenance(
         dagkv_snapshot,
         started_at,
         frozen_at,
+        nvidia_root,
+        nvidia_manifest_sha,
+        nvidia_content_digest,
+        nvidia_driver_version,
     )
 
 
@@ -1342,6 +1398,10 @@ def _validate_run(run_dir: Path) -> ValidatedFormalRun:
         dagkv_snapshot,
         started_at,
         frozen_at,
+        nvidia_root,
+        nvidia_manifest_sha,
+        nvidia_content_digest,
+        nvidia_driver_version,
     ) = _validate_provenance(
         provenance,
         run_id=run_id,
@@ -1410,6 +1470,10 @@ def _validate_run(run_dir: Path) -> ValidatedFormalRun:
         reproducibility_fingerprint=fingerprint,
         protocol_sha256=entries["protocol.md"],
         dagkv_snapshot_sha256=dagkv_snapshot,
+        nvidia_userspace_bundle_root=nvidia_root,
+        nvidia_userspace_bundle_manifest_sha256=nvidia_manifest_sha,
+        nvidia_userspace_bundle_content_digest=nvidia_content_digest,
+        nvidia_driver_version=nvidia_driver_version,
         input_inventory=input_inventory,
     )
 
@@ -1549,6 +1613,14 @@ def _validate_parent_evidence(
         calibration_run_ids=frozenset(run.run_id for run in evidence.runs),
         calibration_inventory=calibration_inventory,
         tolerance_identity=tolerance_identity,
+        nvidia_userspace_bundle_root=evidence.nvidia_userspace_bundle_root,
+        nvidia_userspace_bundle_manifest_sha256=(
+            evidence.nvidia_userspace_bundle_manifest_sha256
+        ),
+        nvidia_userspace_bundle_content_digest=(
+            evidence.nvidia_userspace_bundle_content_digest
+        ),
+        nvidia_driver_version=evidence.nvidia_driver_version,
     )
 
 
@@ -1663,6 +1735,16 @@ def aggregate_campaign(
         },
         "protocol hashes": {run.protocol_sha256 for run in validated},
         "DAGKV snapshots": {run.dagkv_snapshot_sha256 for run in validated},
+        "NVIDIA userspace bundle roots": {
+            run.nvidia_userspace_bundle_root for run in validated
+        },
+        "NVIDIA userspace manifest hashes": {
+            run.nvidia_userspace_bundle_manifest_sha256 for run in validated
+        },
+        "NVIDIA userspace content digests": {
+            run.nvidia_userspace_bundle_content_digest for run in validated
+        },
+        "NVIDIA driver versions": {run.nvidia_driver_version for run in validated},
     }
     for label, values in consistent_fields.items():
         require(len(values) == 1, f"formal {label} differ")
@@ -1687,6 +1769,18 @@ def aggregate_campaign(
             for run in validated
         ),
         "formal runs do not match the parent reproducibility fingerprint",
+    )
+    require(
+        all(
+            run.nvidia_userspace_bundle_root == parent.nvidia_userspace_bundle_root
+            and run.nvidia_userspace_bundle_manifest_sha256
+            == parent.nvidia_userspace_bundle_manifest_sha256
+            and run.nvidia_userspace_bundle_content_digest
+            == parent.nvidia_userspace_bundle_content_digest
+            and run.nvidia_driver_version == parent.nvidia_driver_version
+            for run in validated
+        ),
+        "formal runs do not bind the calibration NVIDIA userspace bundle",
     )
     require(
         all(run.frozen_at_utc == parent.frozen_at_utc for run in validated),
@@ -1715,6 +1809,14 @@ def aggregate_campaign(
         "calibration_manifest_sha256": ordered[0].calibration_manifest_sha256,
         "reproducibility_fingerprint": ordered[0].reproducibility_fingerprint,
         "protocol_sha256": ordered[0].protocol_sha256,
+        "nvidia_userspace_bundle_root": ordered[0].nvidia_userspace_bundle_root,
+        "nvidia_userspace_bundle_manifest_sha256": (
+            ordered[0].nvidia_userspace_bundle_manifest_sha256
+        ),
+        "nvidia_userspace_bundle_content_digest": (
+            ordered[0].nvidia_userspace_bundle_content_digest
+        ),
+        "nvidia_driver_version": ordered[0].nvidia_driver_version,
         "runs": [
             {
                 "run_id": run.run_id,

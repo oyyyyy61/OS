@@ -192,12 +192,13 @@ def _make_run(
     fingerprint_seed: str = "shared",
     tolerance_sha256: str | None = None,
     calibration_sha256: str | None = None,
-    protocol_payload: bytes = b"# frozen M2 v2 protocol\n",
+    protocol_payload: bytes = b"# frozen M2 v3 protocol\n",
     gate_status: str = "M2_ITEM8_FORMAL_HOLDOUT_PASSED",
     formal_run_passed: bool = True,
     item8_accepted: bool = False,
     run_id: str | None = None,
     frozen_at_utc: str = "2026-07-24T00:00:00+00:00",
+    nvidia_userspace_bundle_root: str = "/fixture/nvidia-bundle",
 ) -> Path:
     run_dir = campaign / f"attempt-{index:03d}"
     run_dir.mkdir()
@@ -232,6 +233,14 @@ def _make_run(
     implementation = {
         "files": implementation_files,
         "manifest_sha256": implementation_sha,
+    }
+    nvidia_content_digest = _digest_bytes(b"nvidia-userspace-bundle")
+    nvidia_manifest_sha = _digest_bytes(b"nvidia-userspace-manifest")
+    nvidia_userspace = {
+        "root": nvidia_userspace_bundle_root,
+        "content_digest": nvidia_content_digest,
+        "manifest_sha256": nvidia_manifest_sha,
+        "kernel_module_version": "580.173.02",
     }
     system = {"fixture_environment": fingerprint_seed}
     engine_config = {
@@ -285,6 +294,7 @@ def _make_run(
         "model_manifest_sha256": model["manifest_sha256"],
         "runtime_binary_manifest_sha256": runtime["manifest_sha256"],
         "dependency_manifest_sha256": dependencies["manifest_sha256"],
+        "nvidia_driver_userspace_content_digest": nvidia_content_digest,
         "system": system,
         "prompt_token_ids": list(range(1000, 1017)),
         "block_size": 16,
@@ -399,6 +409,7 @@ def _make_run(
         "runtime_binaries": runtime,
         "dependencies": dependencies,
         "system": system,
+        "nvidia_driver_userspace": nvidia_userspace,
         "reproducibility_components": components,
         "reproducibility_fingerprint": fingerprint,
         "engine_config": engine_config,
@@ -410,6 +421,10 @@ def _make_run(
             "implementation_manifest_sha256": implementation_sha,
             "model_file_stats_unchanged": True,
             "runtime_binary_stats_unchanged": True,
+            "nvidia_driver_userspace_content_digest": nvidia_content_digest,
+            "nvidia_driver_userspace_manifest_sha256": nvidia_manifest_sha,
+            "nvidia_driver_userspace_unchanged": True,
+            "libcuda_mapping_unchanged": True,
         },
     }
     _write_json(run_dir / "result.json", result)
@@ -465,7 +480,7 @@ def parent_evidence(tmp_path_factory: pytest.TempPathFactory) -> ParentEvidenceF
     calibration_root.mkdir()
     calibration_manifest = calibration_root / "M2_CALIBRATION_MANIFEST.json"
     calibration_payload = {
-        "schema_version": "dagkv.m2.calibration_cohort.v2",
+        "schema_version": "dagkv.m2.calibration_cohort.v3",
         "run_count": 59,
         "formal_atol": 0.125,
         "formal_rtol": 0.0,
@@ -522,6 +537,14 @@ def stub_published_calibration_validation(
         payload = json.loads(raw)
         evidence = SimpleNamespace(
             reproducibility_fingerprint=payload["reproducibility_fingerprint"],
+            nvidia_userspace_bundle_root="/fixture/nvidia-bundle",
+            nvidia_userspace_bundle_manifest_sha256=_digest_bytes(
+                b"nvidia-userspace-manifest"
+            ),
+            nvidia_userspace_bundle_content_digest=_digest_bytes(
+                b"nvidia-userspace-bundle"
+            ),
+            nvidia_driver_version="580.173.02",
             runs=tuple(
                 SimpleNamespace(run_id=f"m2-calibration-{index:03d}")
                 for index in range(1, 60)
@@ -613,6 +636,14 @@ def test_accepts_exactly_twenty_formal_runs_atomically(
     assert manifest["performance_claims_supported"] is False
     assert manifest["frozen_tolerance_sha256"] == parent_evidence.tolerance_sha256
     assert manifest["calibration_manifest_sha256"] == parent_evidence.calibration_sha256
+    assert manifest["nvidia_userspace_bundle_root"] == "/fixture/nvidia-bundle"
+    assert manifest["nvidia_userspace_bundle_manifest_sha256"] == _digest_bytes(
+        b"nvidia-userspace-manifest"
+    )
+    assert manifest["nvidia_userspace_bundle_content_digest"] == _digest_bytes(
+        b"nvidia-userspace-bundle"
+    )
+    assert manifest["nvidia_driver_version"] == "580.173.02"
     assert manifest["statement"] == ACCEPTANCE_STATEMENT
     assert len(manifest["runs"]) == 20
     assert manifest["runs"] == sorted(manifest["runs"], key=lambda run: run["run_id"])
@@ -632,6 +663,62 @@ def test_accepts_exactly_twenty_formal_runs_atomically(
     assert not list(tmp_path.rglob("M2_ACCEPTANCE_MANIFEST.json"))
     assert len(stub_raw_replay) == FORMAL_RUN_COUNT
     assert set(stub_raw_replay) == set(campaign.iterdir())
+
+
+def test_nvidia_reproducibility_component_must_match_provenance(
+    tmp_path: Path,
+    parent_evidence: ParentEvidenceFixture,
+) -> None:
+    campaign = _make_campaign(tmp_path, parent_evidence)
+    run_dir = campaign / "attempt-000"
+    provenance_path = run_dir / "provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["nvidia_driver_userspace"]["content_digest"] = "0" * 64
+    provenance["postflight"]["nvidia_driver_userspace_content_digest"] = "0" * 64
+    _write_json(provenance_path, provenance)
+    _write_checksums(run_dir)
+    formal_manifest_path = run_dir / FORMAL_RUN_MANIFEST
+    formal_manifest = json.loads(formal_manifest_path.read_text(encoding="utf-8"))
+    formal_manifest["provenance_sha256"] = _digest_bytes(provenance_path.read_bytes())
+    formal_manifest["sha256sums_sha256"] = _digest_bytes(
+        (run_dir / "SHA256SUMS").read_bytes()
+    )
+    _write_json(formal_manifest_path, formal_manifest)
+
+    with pytest.raises(
+        FormalAggregationError,
+        match="NVIDIA reproducibility component differs",
+    ):
+        _aggregate(
+            campaign,
+            parent_evidence,
+            output_path=tmp_path / ACCEPTANCE_MANIFEST,
+        )
+
+
+def test_rejects_formal_bundle_identity_that_differs_from_calibration_parent(
+    tmp_path: Path,
+    parent_evidence: ParentEvidenceFixture,
+) -> None:
+    campaign = tmp_path / "formal-campaign"
+    campaign.mkdir()
+    for index in range(FORMAL_RUN_COUNT):
+        _make_run(
+            campaign,
+            index,
+            tolerance_sha256=parent_evidence.tolerance_sha256,
+            calibration_sha256=parent_evidence.calibration_sha256,
+            nvidia_userspace_bundle_root="/fixture/other-nvidia-bundle",
+        )
+    output = tmp_path / ACCEPTANCE_MANIFEST
+
+    with pytest.raises(
+        FormalAggregationError,
+        match="do not bind the calibration NVIDIA userspace bundle",
+    ):
+        _aggregate(campaign, parent_evidence, output_path=output)
+
+    assert not output.exists()
 
 
 def test_cli_requires_both_parent_evidence_inputs() -> None:

@@ -22,6 +22,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.nvidia_driver_userspace_bundle import (  # noqa: E402
+    BundleValidation,
+    NvidiaUserspaceBundleError,
+    validate_bundle,
+)
 from tools.run_m2_calibration_campaign import (  # noqa: E402
     CalibrationCampaignError as ProcessSupervisorError,
 )
@@ -32,11 +37,11 @@ from tools.run_m2_calibration_campaign import (  # noqa: E402
     _runner_environment,
 )
 
-CAMPAIGN_SCHEMA = "dagkv.m2.formal_campaign_preregistration.v1"
+CAMPAIGN_SCHEMA = "dagkv.m2.formal_campaign_preregistration.v2"
 ATTEMPT_SCHEMA = "dagkv.m2.formal_campaign_attempt.v1"
 FORMAL_CAMPAIGN_PROTOCOL_SCHEMA = "dagkv.m2.formal_campaign.v1"
-DATA_PLANE_PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v2"
-ACCEPTANCE_SCHEMA = "dagkv.m2.item8.acceptance.v1"
+DATA_PLANE_PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v3"
+ACCEPTANCE_SCHEMA = "dagkv.m2.item8.acceptance.v2"
 PRODUCTION_RUN_COUNT = 20
 FORMAL_ATOL = 0.125
 FORMAL_RTOL = 0.0
@@ -51,6 +56,7 @@ RAW_REPLAY_PATH = REPO_ROOT / "tools" / "m2_raw_replay.py"
 EVIDENCE_VALIDATOR_PATH = REPO_ROOT / "tools" / "m2_calibration_evidence.py"
 FORMAL_EVIDENCE_PATH = REPO_ROOT / "tools" / "m2_formal_evidence.py"
 PROCESS_SUPERVISOR_PATH = REPO_ROOT / "tools" / "run_m2_calibration_campaign.py"
+NVIDIA_BUNDLE_VALIDATOR_PATH = REPO_ROOT / "tools" / "nvidia_driver_userspace_bundle.py"
 DATA_PLANE_PROTOCOL_PATH = (
     REPO_ROOT / "research" / "protocols" / "M2_VLLM_REPLAY_PROTOCOL.md"
 )
@@ -60,6 +66,7 @@ FORMAL_CAMPAIGN_PROTOCOL_PATH = (
 DEFAULT_PYTHON = Path("/home/data/25_oyzx/Agentrix/vllm/.venv/bin/python")
 DEFAULT_MODEL = Path("/home/data/25_oyzx/moqae_runtime_gpu/modelscope/Qwen/Qwen3-8B")
 DEFAULT_VLLM_ROOT = Path("/home/data/25_oyzx/Agentrix/vllm")
+LOADER_INJECTION_VARIABLES = ("LD_AUDIT", "LD_PRELOAD")
 
 PREREGISTRATION_NAME = "FORMAL_CAMPAIGN_PREREGISTRATION.json"
 ATTEMPTS_NAME = "FORMAL_ATTEMPTS.jsonl"
@@ -86,6 +93,10 @@ class CampaignConfig:
     frozen_tolerance: Path
     expected_implementation_manifest_sha256: str
     expected_reproducibility_fingerprint: str
+    nvidia_userspace_bundle_root: Path
+    expected_nvidia_userspace_bundle_manifest_sha256: str
+    expected_nvidia_userspace_bundle_content_digest: str
+    expected_nvidia_driver_version: str
     python_executable: Path = DEFAULT_PYTHON
     runner: Path = DEFAULT_RUNNER
     aggregator: Path = DEFAULT_AGGREGATOR
@@ -146,6 +157,47 @@ def _validate_digest(value: str, *, label: str) -> str:
         f"{label} must be a lowercase SHA-256 digest",
     )
     return value
+
+
+def _fresh_validate_nvidia_bundle(config: CampaignConfig) -> BundleValidation:
+    """Rebuild and bind the exact NVIDIA userspace/loaded-driver contract."""
+
+    injected = [name for name in LOADER_INJECTION_VARIABLES if name in os.environ]
+    _require(
+        not injected,
+        f"loader injection environment is forbidden: {','.join(injected)}",
+    )
+    try:
+        validation = validate_bundle(
+            config.nvidia_userspace_bundle_root,
+            expected_manifest_sha256=(
+                config.expected_nvidia_userspace_bundle_manifest_sha256
+            ),
+        )
+    except (NvidiaUserspaceBundleError, OSError) as exc:
+        raise FormalCampaignError(
+            f"NVIDIA userspace bundle validation failed: {exc}"
+        ) from exc
+    _require(
+        validation.manifest_sha256
+        == config.expected_nvidia_userspace_bundle_manifest_sha256,
+        "NVIDIA userspace bundle manifest digest drifted",
+    )
+    _require(
+        validation.content_digest
+        == config.expected_nvidia_userspace_bundle_content_digest,
+        "NVIDIA userspace bundle content digest drifted",
+    )
+    _require(
+        validation.kernel_module_version == config.expected_nvidia_driver_version,
+        "NVIDIA kernel driver version drifted",
+    )
+    library_path = str(validation.library_path)
+    _require(
+        library_path and ":" not in library_path,
+        "NVIDIA bundle library path cannot be represented in LD_LIBRARY_PATH",
+    )
+    return validation
 
 
 def _validate_git_head(value: str, *, label: str) -> str:
@@ -470,6 +522,10 @@ def _validate_parent_inputs(
     *,
     expected_implementation_manifest_sha256: str,
     expected_reproducibility_fingerprint: str,
+    expected_nvidia_userspace_bundle_root: Path,
+    expected_nvidia_userspace_bundle_manifest_sha256: str,
+    expected_nvidia_userspace_bundle_content_digest: str,
+    expected_nvidia_driver_version: str,
 ) -> dict[str, Any]:
     try:
         from tools.aggregate_m2_formal import (  # noqa: PLC0415
@@ -491,12 +547,39 @@ def _validate_parent_inputs(
         parent.reproducibility_fingerprint == expected_reproducibility_fingerprint,
         "calibration/tolerance fingerprint differs from the formal freeze",
     )
+    preregistration_name = calibration.get("campaign_preregistration_file")
+    _require(
+        preregistration_name == "CAMPAIGN_PREREGISTRATION.json",
+        "calibration preregistration filename drifted",
+    )
+    calibration_preregistration = _read_json_object(
+        calibration_manifest.parent / preregistration_name,
+        label="calibration campaign preregistration",
+    )
+    expected_bundle_binding = {
+        "nvidia_userspace_bundle_root": str(expected_nvidia_userspace_bundle_root),
+        "expected_nvidia_userspace_bundle_manifest_sha256": (
+            expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        "expected_nvidia_userspace_bundle_content_digest": (
+            expected_nvidia_userspace_bundle_content_digest
+        ),
+        "expected_nvidia_driver_version": expected_nvidia_driver_version,
+    }
+    _require(
+        all(
+            calibration_preregistration.get(field) == value
+            for field, value in expected_bundle_binding.items()
+        ),
+        "calibration NVIDIA userspace/driver binding differs from the formal freeze",
+    )
     return {
         "calibration_manifest_sha256": parent.calibration_manifest_sha256,
         "frozen_tolerance_sha256": parent.frozen_tolerance_sha256,
         "reproducibility_fingerprint": parent.reproducibility_fingerprint,
         "frozen_at_utc": parent.frozen_at_utc.isoformat(),
         "calibration_run_count": len(parent.calibration_run_ids),
+        **expected_bundle_binding,
     }
 
 
@@ -521,7 +604,12 @@ def _selection_rule(run_names: Sequence[str]) -> dict[str, Any]:
 
 def _normalized_config(
     config: CampaignConfig,
-) -> tuple[CampaignConfig, dict[str, dict[str, Any]], dict[str, Any]]:
+) -> tuple[
+    CampaignConfig,
+    dict[str, dict[str, Any]],
+    dict[str, Any],
+    BundleValidation,
+]:
     expected_implementation = _validate_digest(
         config.expected_implementation_manifest_sha256,
         label="expected implementation manifest",
@@ -529,6 +617,21 @@ def _normalized_config(
     expected_fingerprint = _validate_digest(
         config.expected_reproducibility_fingerprint,
         label="expected reproducibility fingerprint",
+    )
+    expected_bundle_manifest = _validate_digest(
+        config.expected_nvidia_userspace_bundle_manifest_sha256,
+        label="expected NVIDIA userspace bundle manifest",
+    )
+    expected_bundle_content = _validate_digest(
+        config.expected_nvidia_userspace_bundle_content_digest,
+        label="expected NVIDIA userspace bundle content",
+    )
+    _require(
+        isinstance(config.expected_nvidia_driver_version, str)
+        and config.expected_nvidia_driver_version.strip()
+        == config.expected_nvidia_driver_version
+        and config.expected_nvidia_driver_version,
+        "expected NVIDIA driver version must be a non-empty canonical string",
     )
     _require(
         _current_implementation_manifest_sha256() == expected_implementation,
@@ -568,6 +671,10 @@ def _normalized_config(
     process_supervisor = _resolved_file(
         PROCESS_SUPERVISOR_PATH, label="process supervisor"
     )
+    nvidia_bundle_validator = _resolved_file(
+        NVIDIA_BUNDLE_VALIDATOR_PATH,
+        label="NVIDIA userspace bundle validator",
+    )
     data_plane_protocol = _resolved_file(
         DATA_PLANE_PROTOCOL_PATH, label="M2 data-plane protocol"
     )
@@ -585,10 +692,19 @@ def _normalized_config(
     model = config.model.expanduser().resolve()
     vllm_root = config.vllm_root.expanduser().resolve()
     campaign_root = config.campaign_root.expanduser().resolve()
+    bundle_root = Path(
+        os.path.abspath(config.nvidia_userspace_bundle_root.expanduser())
+    )
     _require(model.is_dir(), f"model directory is missing: {model}")
     _require(vllm_root.is_dir(), f"vLLM root is missing: {vllm_root}")
     calibration_root = calibration_manifest.parent.resolve()
-    for protected in (REPO_ROOT.resolve(), model, vllm_root, calibration_root):
+    for protected in (
+        REPO_ROOT.resolve(),
+        model,
+        vllm_root,
+        calibration_root,
+        bundle_root,
+    ):
         _require(
             campaign_root != protected and not campaign_root.is_relative_to(protected),
             f"formal campaign root is inside protected input root: {protected}",
@@ -604,6 +720,10 @@ def _normalized_config(
         frozen_tolerance=frozen_tolerance,
         expected_implementation_manifest_sha256=expected_implementation,
         expected_reproducibility_fingerprint=expected_fingerprint,
+        nvidia_userspace_bundle_root=bundle_root,
+        expected_nvidia_userspace_bundle_manifest_sha256=expected_bundle_manifest,
+        expected_nvidia_userspace_bundle_content_digest=expected_bundle_content,
+        expected_nvidia_driver_version=config.expected_nvidia_driver_version,
         python_executable=python_executable,
         runner=runner,
         aggregator=aggregator,
@@ -617,6 +737,11 @@ def _normalized_config(
         kill_wait_s=float(config.kill_wait_s),
         cuda_device=config.cuda_device,
     )
+    bundle_validation = _fresh_validate_nvidia_bundle(normalized)
+    _require(
+        bundle_validation.runtime.rootfs.parent == bundle_root,
+        "validated NVIDIA bundle rootfs binding drifted",
+    )
     frozen_files = {
         "formal_protocol": _frozen_file_entry(formal_protocol),
         "data_plane_protocol": _frozen_file_entry(data_plane_protocol),
@@ -627,6 +752,7 @@ def _normalized_config(
         "raw_replay": _frozen_file_entry(raw_replay),
         "calibration_evidence": _frozen_file_entry(evidence),
         "process_supervisor": _frozen_file_entry(process_supervisor),
+        "nvidia_bundle_validator": _frozen_file_entry(nvidia_bundle_validator),
         "frozen_tolerance": _frozen_file_entry(frozen_tolerance),
         "calibration_manifest": _frozen_file_entry(calibration_manifest),
     }
@@ -635,6 +761,10 @@ def _normalized_config(
         frozen_tolerance,
         expected_implementation_manifest_sha256=expected_implementation,
         expected_reproducibility_fingerprint=expected_fingerprint,
+        expected_nvidia_userspace_bundle_root=bundle_root,
+        expected_nvidia_userspace_bundle_manifest_sha256=expected_bundle_manifest,
+        expected_nvidia_userspace_bundle_content_digest=expected_bundle_content,
+        expected_nvidia_driver_version=config.expected_nvidia_driver_version,
     )
     _require(
         parent_binding["calibration_manifest_sha256"]
@@ -646,7 +776,7 @@ def _normalized_config(
         == frozen_files["frozen_tolerance"]["sha256"],
         "validated tolerance hash differs from its frozen file hash",
     )
-    return normalized, frozen_files, parent_binding
+    return normalized, frozen_files, parent_binding, bundle_validation
 
 
 def _run_command(config: CampaignConfig, run_dir: Path) -> list[str]:
@@ -665,6 +795,14 @@ def _run_command(config: CampaignConfig, run_dir: Path) -> list[str]:
         str(config.model),
         "--vllm-root",
         str(config.vllm_root),
+        "--expected-nvidia-driver-version",
+        config.expected_nvidia_driver_version,
+        "--nvidia-userspace-bundle-root",
+        str(config.nvidia_userspace_bundle_root),
+        "--expected-nvidia-userspace-bundle-manifest-sha256",
+        config.expected_nvidia_userspace_bundle_manifest_sha256,
+        "--expected-nvidia-userspace-bundle-content-digest",
+        config.expected_nvidia_userspace_bundle_content_digest,
         "--cpu-bytes",
         str(config.cpu_bytes),
         "--timeout-s",
@@ -694,12 +832,16 @@ def _preregistration_payload(
     config: CampaignConfig,
     frozen_files: Mapping[str, Mapping[str, Any]],
     parent_binding: Mapping[str, Any],
+    bundle_validation: BundleValidation,
     *,
     expected_runs: int,
     preparation_git_head: str | None,
 ) -> dict[str, Any]:
     run_names = [f"run-{index:03d}" for index in range(1, expected_runs + 1)]
-    environment = _runner_environment(config.cuda_device)
+    environment = _runner_environment(
+        config.cuda_device,
+        nvidia_library_path=bundle_validation.library_path,
+    )
     return {
         "schema_version": CAMPAIGN_SCHEMA,
         "campaign_id": f"m2-formal-{uuid.uuid4().hex}",
@@ -723,6 +865,14 @@ def _preregistration_payload(
         "expected_reproducibility_fingerprint": (
             config.expected_reproducibility_fingerprint
         ),
+        "nvidia_userspace_bundle_root": str(config.nvidia_userspace_bundle_root),
+        "expected_nvidia_userspace_bundle_manifest_sha256": (
+            config.expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        "expected_nvidia_userspace_bundle_content_digest": (
+            config.expected_nvidia_userspace_bundle_content_digest
+        ),
+        "expected_nvidia_driver_version": config.expected_nvidia_driver_version,
         "parent_binding": dict(parent_binding),
         "frozen_files": dict(frozen_files),
         "python_executable": _frozen_file_entry(config.python_executable),
@@ -769,7 +919,9 @@ def prepare_campaign(
     preparation_git_head = (
         _preparation_git_head() if _expected_runs == PRODUCTION_RUN_COUNT else None
     )
-    frozen_config, frozen_files, parent_binding = _normalized_config(config)
+    frozen_config, frozen_files, parent_binding, bundle_validation = _normalized_config(
+        config
+    )
     if _expected_runs == PRODUCTION_RUN_COUNT:
         _require(
             _preparation_git_head() == preparation_git_head,
@@ -782,6 +934,7 @@ def prepare_campaign(
         frozen_config,
         frozen_files,
         parent_binding,
+        bundle_validation,
         expected_runs=_expected_runs,
         preparation_git_head=preparation_git_head,
     )
@@ -890,6 +1043,18 @@ def _prepared_campaign(
             expected_reproducibility_fingerprint=preregistration[
                 "expected_reproducibility_fingerprint"
             ],
+            nvidia_userspace_bundle_root=Path(
+                preregistration["nvidia_userspace_bundle_root"]
+            ),
+            expected_nvidia_userspace_bundle_manifest_sha256=preregistration[
+                "expected_nvidia_userspace_bundle_manifest_sha256"
+            ],
+            expected_nvidia_userspace_bundle_content_digest=preregistration[
+                "expected_nvidia_userspace_bundle_content_digest"
+            ],
+            expected_nvidia_driver_version=preregistration[
+                "expected_nvidia_driver_version"
+            ],
             python_executable=Path(preregistration["python_executable"]["path"]),
             runner=Path(preregistration["frozen_files"]["runner"]["path"]),
             aggregator=Path(
@@ -909,7 +1074,9 @@ def _prepared_campaign(
         raise FormalCampaignError(
             f"prepared formal campaign configuration is malformed: {exc}"
         ) from exc
-    frozen_config, frozen_files, parent_binding = _normalized_config(config)
+    frozen_config, frozen_files, parent_binding, bundle_validation = _normalized_config(
+        config
+    )
     _require(
         preregistration.get("frozen_files") == frozen_files,
         "prepared formal frozen-file inventory drifted",
@@ -937,7 +1104,10 @@ def _prepared_campaign(
         == _aggregate_command(frozen_config, root / ACCEPTANCE_NAME),
         "prepared formal command freeze drifted",
     )
-    environment = _runner_environment(frozen_config.cuda_device)
+    environment = _runner_environment(
+        frozen_config.cuda_device,
+        nvidia_library_path=bundle_validation.library_path,
+    )
     environment_keys = (
         "CUDA_VISIBLE_DEVICES",
         "HF_HUB_OFFLINE",
@@ -1257,6 +1427,17 @@ def _validate_acceptance_manifest(
         manifest.get("protocol_sha256") == data_plane_protocol_sha256,
         "item-8 acceptance protocol hash drifted",
     )
+    _require(
+        manifest.get("nvidia_userspace_bundle_root")
+        == parent_binding["nvidia_userspace_bundle_root"]
+        and manifest.get("nvidia_userspace_bundle_manifest_sha256")
+        == parent_binding["expected_nvidia_userspace_bundle_manifest_sha256"]
+        and manifest.get("nvidia_userspace_bundle_content_digest")
+        == parent_binding["expected_nvidia_userspace_bundle_content_digest"]
+        and manifest.get("nvidia_driver_version")
+        == parent_binding["expected_nvidia_driver_version"],
+        "item-8 acceptance NVIDIA userspace/driver binding drifted",
+    )
     expected_entries = sorted(
         (
             {
@@ -1302,6 +1483,7 @@ def _replay_production_evidence(
 ) -> None:
     root = config.campaign_root
     run_names = preregistration["run_names"]
+    bundle_before = _fresh_validate_nvidia_bundle(config)
     _require(
         sorted(entry.name for entry in root.iterdir())
         == _expected_root_entries(run_names),
@@ -1329,6 +1511,14 @@ def _replay_production_evidence(
         expected_reproducibility_fingerprint=(
             config.expected_reproducibility_fingerprint
         ),
+        expected_nvidia_userspace_bundle_root=(config.nvidia_userspace_bundle_root),
+        expected_nvidia_userspace_bundle_manifest_sha256=(
+            config.expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        expected_nvidia_userspace_bundle_content_digest=(
+            config.expected_nvidia_userspace_bundle_content_digest
+        ),
+        expected_nvidia_driver_version=config.expected_nvidia_driver_version,
     )
     _require(
         parent_binding == preregistration["parent_binding"],
@@ -1409,6 +1599,32 @@ def _replay_production_evidence(
             and validation.get("gate_status") == manifest["gate_status"],
             "formal aggregate terminal drifted",
         )
+    parent_after = _validate_parent_inputs(
+        config.calibration_manifest,
+        config.frozen_tolerance,
+        expected_implementation_manifest_sha256=(
+            config.expected_implementation_manifest_sha256
+        ),
+        expected_reproducibility_fingerprint=(
+            config.expected_reproducibility_fingerprint
+        ),
+        expected_nvidia_userspace_bundle_root=config.nvidia_userspace_bundle_root,
+        expected_nvidia_userspace_bundle_manifest_sha256=(
+            config.expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        expected_nvidia_userspace_bundle_content_digest=(
+            config.expected_nvidia_userspace_bundle_content_digest
+        ),
+        expected_nvidia_driver_version=config.expected_nvidia_driver_version,
+    )
+    _require(
+        parent_after == parent_binding,
+        "formal parent evidence changed during replay",
+    )
+    _require(
+        _fresh_validate_nvidia_bundle(config) == bundle_before,
+        "NVIDIA userspace bundle changed during formal evidence replay",
+    )
 
 
 def _revalidate_production_candidate(
@@ -1451,7 +1667,9 @@ def _publish_and_revalidate_production_seal(
     campaign_root: Path,
     *,
     expected_preregistration_sha256: str,
+    config: CampaignConfig,
 ) -> str:
+    bundle_before = _fresh_validate_nvidia_bundle(config)
     try:
         from tools.m2_formal_evidence import (  # noqa: PLC0415
             FormalEvidenceError,
@@ -1467,6 +1685,11 @@ def _publish_and_revalidate_production_seal(
             campaign_root / BUNDLE_SEAL_NAME,
             expected_seal_sha256=seal_sha256,
             expected_preregistration_sha256=expected_preregistration_sha256,
+        )
+        _revalidate_nvidia_boundary(
+            config,
+            bundle_before,
+            label="formal seal publication and replay",
         )
     except (FormalEvidenceError, OSError) as exc:
         raise FormalCampaignError(
@@ -1501,6 +1724,17 @@ def _record_process_failure(
     _append_attempt(attempts_path, terminal)
 
 
+def _revalidate_nvidia_boundary(
+    config: CampaignConfig,
+    before: BundleValidation,
+    *,
+    label: str,
+) -> BundleValidation:
+    after = _fresh_validate_nvidia_bundle(config)
+    _require(after == before, f"NVIDIA userspace bundle changed during {label}")
+    return after
+
+
 def _verify_execution_freeze(
     *,
     config: CampaignConfig,
@@ -1510,7 +1744,7 @@ def _verify_execution_freeze(
     frozen_files: Mapping[str, Mapping[str, Any]],
     execution_binding: Mapping[str, Any],
     production: bool,
-) -> None:
+) -> BundleValidation:
     _verify_frozen_files(frozen_files)
     _require(
         _current_implementation_manifest_sha256()
@@ -1527,6 +1761,7 @@ def _verify_execution_freeze(
             preregistration=preregistration,
             preregistration_sha256=preregistration_sha256,
         )
+    return _fresh_validate_nvidia_bundle(config)
 
 
 def _execute_prepared_campaign_locked(
@@ -1549,7 +1784,6 @@ def _execute_prepared_campaign_locked(
     campaign_id = preregistration["campaign_id"]
     run_names = preregistration["run_names"]
     parent_binding = preregistration["parent_binding"]
-    environment = _runner_environment(config.cuda_device)
     production = _expected_runs == PRODUCTION_RUN_COUNT
     execution_binding = (
         _establish_execution_binding(preregistration, preregistration_sha256)
@@ -1559,7 +1793,7 @@ def _execute_prepared_campaign_locked(
     completed_validations: list[dict[str, Any]] = []
 
     for sequence, run_name in enumerate(run_names, start=1):
-        _verify_execution_freeze(
+        bundle_before = _verify_execution_freeze(
             config=config,
             preregistration=preregistration,
             preregistration_path=preregistration_path,
@@ -1567,6 +1801,10 @@ def _execute_prepared_campaign_locked(
             frozen_files=frozen_files,
             execution_binding=execution_binding,
             production=production,
+        )
+        environment = _runner_environment(
+            config.cuda_device,
+            nvidia_library_path=bundle_before.library_path,
         )
         run_dir, stdout_path, stderr_path = _campaign_paths(root, run_name)
         _require(
@@ -1608,6 +1846,17 @@ def _execute_prepared_campaign_locked(
         except (OSError, ProcessSupervisorError) as exc:
             if isinstance(exc, ProcessExecutionInterrupted):
                 outcome = exc.outcome
+            error: BaseException = exc
+            try:
+                _revalidate_nvidia_boundary(
+                    config,
+                    bundle_before,
+                    label=run_name,
+                )
+            except FormalCampaignError as bundle_exc:
+                error = FormalCampaignError(
+                    f"{exc}; post-run bundle validation failed: {bundle_exc}"
+                )
             _record_process_failure(
                 submitted=submitted,
                 outcome=outcome,
@@ -1615,11 +1864,30 @@ def _execute_prepared_campaign_locked(
                 stderr_path=stderr_path,
                 artifact_path=run_dir,
                 attempts_path=attempts_path,
-                error=exc,
+                error=error,
             )
             raise FormalCampaignError(
-                f"{run_name} could not reach a process terminal: {exc}"
+                f"{run_name} could not reach a process terminal: {error}"
             ) from exc
+
+        try:
+            _revalidate_nvidia_boundary(
+                config,
+                bundle_before,
+                label=run_name,
+            )
+        except FormalCampaignError as exc:
+            terminal = _terminal_payload(
+                submitted,
+                status="validation_failed",
+                outcome=outcome,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                artifact_path=run_dir,
+                error=f"post-run bundle validation failed: {exc}",
+            )
+            _append_attempt(attempts_path, terminal)
+            raise
 
         if outcome.timed_out or outcome.exit_code != 0:
             status = "timed_out" if outcome.timed_out else "process_failed"
@@ -1708,7 +1976,7 @@ def _execute_prepared_campaign_locked(
             == 1,
             "formal holdouts do not share one frozen DAGKV snapshot",
         )
-    _verify_execution_freeze(
+    aggregate_bundle_before = _verify_execution_freeze(
         config=config,
         preregistration=preregistration,
         preregistration_path=preregistration_path,
@@ -1716,6 +1984,10 @@ def _execute_prepared_campaign_locked(
         frozen_files=frozen_files,
         execution_binding=execution_binding,
         production=production,
+    )
+    aggregate_environment = _runner_environment(
+        config.cuda_device,
+        nvidia_library_path=aggregate_bundle_before.library_path,
     )
     formal_prefix = _sealed_formal_prefix(
         attempts_path,
@@ -1750,7 +2022,7 @@ def _execute_prepared_campaign_locked(
             aggregate_command,
             stdout_path=aggregate_stdout,
             stderr_path=aggregate_stderr,
-            environment=environment,
+            environment=aggregate_environment,
             timeout_s=config.aggregation_timeout_s,
             terminate_grace_s=config.terminate_grace_s,
             kill_wait_s=config.kill_wait_s,
@@ -1758,6 +2030,17 @@ def _execute_prepared_campaign_locked(
     except (OSError, ProcessSupervisorError) as exc:
         if isinstance(exc, ProcessExecutionInterrupted):
             aggregate_outcome = exc.outcome
+        error: BaseException = exc
+        try:
+            _revalidate_nvidia_boundary(
+                config,
+                aggregate_bundle_before,
+                label="formal aggregation",
+            )
+        except FormalCampaignError as bundle_exc:
+            error = FormalCampaignError(
+                f"{exc}; post-aggregate bundle validation failed: {bundle_exc}"
+            )
         _record_process_failure(
             submitted=aggregate_submitted,
             outcome=aggregate_outcome,
@@ -1765,11 +2048,30 @@ def _execute_prepared_campaign_locked(
             stderr_path=aggregate_stderr,
             artifact_path=acceptance_path,
             attempts_path=attempts_path,
-            error=exc,
+            error=error,
         )
         raise FormalCampaignError(
-            f"formal aggregation could not terminate: {exc}"
+            f"formal aggregation could not terminate: {error}"
         ) from exc
+
+    try:
+        _revalidate_nvidia_boundary(
+            config,
+            aggregate_bundle_before,
+            label="formal aggregation",
+        )
+    except FormalCampaignError as exc:
+        terminal = _terminal_payload(
+            aggregate_submitted,
+            status="validation_failed",
+            outcome=aggregate_outcome,
+            stdout_path=aggregate_stdout,
+            stderr_path=aggregate_stderr,
+            artifact_path=acceptance_path,
+            error=f"post-aggregate bundle validation failed: {exc}",
+        )
+        _append_attempt(attempts_path, terminal)
+        raise
 
     if aggregate_outcome.timed_out or aggregate_outcome.exit_code != 0:
         status = "timed_out" if aggregate_outcome.timed_out else "process_failed"
@@ -1882,6 +2184,7 @@ def _execute_prepared_campaign_locked(
         _publish_and_revalidate_production_seal(
             root,
             expected_preregistration_sha256=preregistration_sha256,
+            config=config,
         )
     return acceptance
 
@@ -1934,6 +2237,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--frozen-tolerance", type=Path)
     parser.add_argument("--expected-implementation-manifest-sha256")
     parser.add_argument("--expected-reproducibility-fingerprint")
+    parser.add_argument("--nvidia-userspace-bundle-root", type=Path)
+    parser.add_argument("--expected-nvidia-userspace-bundle-manifest-sha256")
+    parser.add_argument("--expected-nvidia-userspace-bundle-content-digest")
+    parser.add_argument("--expected-nvidia-driver-version")
     parser.add_argument("--expected-preregistration-sha256")
     parser.add_argument("--python-executable", type=Path, default=DEFAULT_PYTHON)
     parser.add_argument("--runner", type=Path, default=DEFAULT_RUNNER)
@@ -1976,11 +2283,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.frozen_tolerance,
         args.expected_implementation_manifest_sha256,
         args.expected_reproducibility_fingerprint,
+        args.nvidia_userspace_bundle_root,
+        args.expected_nvidia_userspace_bundle_manifest_sha256,
+        args.expected_nvidia_userspace_bundle_content_digest,
+        args.expected_nvidia_driver_version,
     )
     if any(value is None for value in required):
         parser.error(
             "formal preparation requires calibration manifest, frozen tolerance, "
-            "expected implementation, and expected reproducibility SHA-256 values"
+            "expected implementation/reproducibility values, and NVIDIA userspace "
+            "bundle root/manifest/content/driver identities"
         )
     if args.expected_preregistration_sha256 is not None:
         parser.error(
@@ -1996,6 +2308,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_reproducibility_fingerprint=(
             args.expected_reproducibility_fingerprint
         ),
+        nvidia_userspace_bundle_root=args.nvidia_userspace_bundle_root,
+        expected_nvidia_userspace_bundle_manifest_sha256=(
+            args.expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        expected_nvidia_userspace_bundle_content_digest=(
+            args.expected_nvidia_userspace_bundle_content_digest
+        ),
+        expected_nvidia_driver_version=args.expected_nvidia_driver_version,
         python_executable=args.python_executable,
         runner=args.runner,
         aggregator=args.aggregator,

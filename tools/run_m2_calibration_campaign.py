@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -12,20 +13,38 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-CAMPAIGN_SCHEMA = "dagkv.m2.calibration_campaign_preregistration.v1"
-ATTEMPT_SCHEMA = "dagkv.m2.calibration_campaign_attempt.v1"
-COHORT_SCHEMA = "dagkv.m2.calibration_cohort.v2"
-PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v2"
+try:
+    from tools.nvidia_driver_userspace_bundle import (
+        BundleValidation,
+        NvidiaUserspaceBundleError,
+        validate_bundle,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "tools":
+        raise
+    from nvidia_driver_userspace_bundle import (  # type: ignore[no-redef]
+        BundleValidation,
+        NvidiaUserspaceBundleError,
+        validate_bundle,
+    )
+
+CAMPAIGN_SCHEMA = "dagkv.m2.calibration_campaign_preregistration.v3"
+ATTEMPT_SCHEMA = "dagkv.m2.calibration_campaign_attempt.v2"
+COHORT_SCHEMA = "dagkv.m2.calibration_cohort.v3"
+PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v3"
 PRODUCTION_RUN_COUNT = 59
 CALIBRATION_ATOL = 0.125
 CALIBRATION_RTOL = 0.0
 BASE_LD_LIBRARY_PATH = "/usr/local/cuda/lib64:"
+CUDA_LIBRARY_PATH = "/usr/local/cuda/lib64"
+LOADER_INJECTION_VARIABLES = ("LD_AUDIT", "LD_PRELOAD")
 NATURAL_DESCENDANT_GRACE_S = 2.0
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +53,7 @@ DEFAULT_RUNNER = REPO_ROOT / "tools" / "run_m2_vllm_abba.py"
 DEFAULT_AGGREGATOR = REPO_ROOT / "tools" / "aggregate_m2_calibration.py"
 EVIDENCE_VALIDATOR_PATH = REPO_ROOT / "tools" / "m2_calibration_evidence.py"
 RAW_REPLAY_PATH = REPO_ROOT / "tools" / "m2_raw_replay.py"
+NVIDIA_BUNDLE_VALIDATOR_PATH = REPO_ROOT / "tools" / "nvidia_driver_userspace_bundle.py"
 PROTOCOL_PATH = REPO_ROOT / "research" / "protocols" / "M2_VLLM_REPLAY_PROTOCOL.md"
 INTEGRATION_ROOT = REPO_ROOT / "integrations" / "vllm_m2"
 DEFAULT_PYTHON = Path("/home/data/25_oyzx/Agentrix/vllm/.venv/bin/python")
@@ -43,6 +63,28 @@ DEFAULT_VLLM_ROOT = Path("/home/data/25_oyzx/Agentrix/vllm")
 PREREGISTRATION_NAME = "CAMPAIGN_PREREGISTRATION.json"
 ATTEMPTS_NAME = "ATTEMPTS.jsonl"
 COHORT_NAME = "M2_CALIBRATION_MANIFEST.json"
+MARKER_SCHEMA = "dagkv.m2.calibration_launch_marker.v1"
+LAUNCH_MARKER_REPOSITORY_PATH = "evidence/m2/CALIBRATION_V3_LAUNCH_MARKER.json"
+MARKER_CLAIM_SCOPE = "M2_CALIBRATION_ONLY_NO_PERFORMANCE_CLAIM"
+MARKER_FIELDS = frozenset(
+    {
+        "schema_version",
+        "campaign_id",
+        "campaign_root",
+        "campaign_preregistration_sha256",
+        "preparation_git_head",
+        "created_at_utc",
+        "claim_scope",
+    }
+)
+EXECUTION_BINDING_FIELDS = frozenset(
+    {
+        "preparation_git_head",
+        "execution_git_head",
+        "launch_marker_repository_path",
+        "launch_marker_sha256",
+    }
+)
 
 
 class CalibrationCampaignError(RuntimeError):
@@ -64,6 +106,10 @@ class CampaignConfig:
     campaign_root: Path
     expected_implementation_manifest_sha256: str
     expected_reproducibility_fingerprint: str
+    nvidia_userspace_bundle_root: Path
+    expected_nvidia_driver_version: str
+    expected_nvidia_userspace_bundle_manifest_sha256: str
+    expected_nvidia_userspace_bundle_content_digest: str
     python_executable: Path = DEFAULT_PYTHON
     runner: Path = DEFAULT_RUNNER
     aggregator: Path = DEFAULT_AGGREGATOR
@@ -125,13 +171,260 @@ def _canonical_sha256(payload: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _validate_digest(value: str, *, label: str) -> str:
+def _validate_digest(value: Any, *, label: str) -> str:
     _require(
-        len(value) == 64
+        isinstance(value, str)
+        and len(value) == 64
         and all(character in "0123456789abcdef" for character in value),
         f"{label} must be a lowercase SHA-256 digest",
     )
     return value
+
+
+def _validate_git_head(value: Any, *, label: str) -> str:
+    _require(
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value),
+        f"{label} must be a lowercase SHA-1 Git object ID",
+    )
+    return value
+
+
+def _git_bytes(*arguments: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *arguments],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        stderr = (
+            exc.stderr.decode("utf-8", errors="replace").strip()
+            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr
+            else str(exc)
+        )
+        raise CalibrationCampaignError(
+            f"Git command failed ({' '.join(arguments)}): {stderr}"
+        ) from exc
+    return completed.stdout
+
+
+def _clean_git_head(*, phase: str) -> str:
+    root = _git_bytes("rev-parse", "--show-toplevel").decode("utf-8").strip()
+    _require(Path(root).resolve() == REPO_ROOT.resolve(), "DAGKV Git root drifted")
+    status = _git_bytes("status", "--porcelain=v1", "--untracked-files=all")
+    _require(not status, f"DAGKV worktree must be clean during {phase}")
+    head = _git_bytes("rev-parse", "HEAD").decode("ascii").strip()
+    return _validate_git_head(head, label=f"{phase} Git HEAD")
+
+
+def _marker_payload(
+    marker_bytes: bytes,
+    *,
+    preregistration: Mapping[str, Any],
+    preregistration_sha256: str,
+) -> dict[str, Any]:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key, value in pairs:
+            _require(key not in payload, f"duplicate calibration marker key: {key}")
+            payload[key] = value
+        return payload
+
+    def reject_constant(value: str) -> None:
+        raise CalibrationCampaignError(f"non-finite calibration marker value: {value}")
+
+    try:
+        marker = json.loads(
+            marker_bytes.decode("utf-8"),
+            object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CalibrationCampaignError(
+            f"calibration launch marker is invalid JSON: {exc}"
+        ) from exc
+    _require(isinstance(marker, dict), "calibration launch marker must be an object")
+    _require(set(marker) == MARKER_FIELDS, "calibration launch marker fields drifted")
+    _require(marker.get("schema_version") == MARKER_SCHEMA, "marker schema drifted")
+    _require(
+        marker.get("campaign_id") == preregistration.get("campaign_id")
+        and marker.get("campaign_root") == preregistration.get("campaign_root")
+        and marker.get("campaign_preregistration_sha256") == preregistration_sha256
+        and marker.get("preparation_git_head")
+        == preregistration.get("preparation_git_head")
+        and marker.get("claim_scope") == MARKER_CLAIM_SCOPE,
+        "calibration launch marker binding drifted",
+    )
+    try:
+        marker_created = datetime.fromisoformat(str(marker.get("created_at_utc")))
+        preregistered = datetime.fromisoformat(str(preregistration["created_at_utc"]))
+    except (KeyError, ValueError) as exc:
+        raise CalibrationCampaignError(
+            "calibration marker timestamp is invalid"
+        ) from exc
+    _require(
+        marker_created.tzinfo is not None
+        and preregistered.tzinfo is not None
+        and marker_created >= preregistered,
+        "calibration launch marker must postdate preregistration",
+    )
+    return marker
+
+
+def _establish_execution_binding(
+    preregistration: Mapping[str, Any], preregistration_sha256: str
+) -> dict[str, str]:
+    execution_head = _clean_git_head(phase="calibration execution")
+    preparation_head = _validate_git_head(
+        preregistration.get("preparation_git_head"), label="preparation Git HEAD"
+    )
+    parents = (
+        _git_bytes("rev-list", "--parents", "-n", "1", execution_head)
+        .decode("ascii")
+        .split()
+    )
+    _require(
+        parents == [execution_head, preparation_head],
+        "execution HEAD must be the direct single-parent child of preparation HEAD",
+    )
+    changed = (
+        _git_bytes("diff-tree", "--no-commit-id", "--name-only", "-r", execution_head)
+        .decode("utf-8")
+        .splitlines()
+    )
+    _require(
+        changed == [LAUNCH_MARKER_REPOSITORY_PATH],
+        "execution commit must modify only the calibration launch marker",
+    )
+    marker_path = REPO_ROOT / LAUNCH_MARKER_REPOSITORY_PATH
+    _require(
+        marker_path.is_file()
+        and not marker_path.is_symlink()
+        and marker_path.stat().st_nlink == 1,
+        "calibration launch marker worktree file is missing or unsafe",
+    )
+    worktree_bytes = marker_path.read_bytes()
+    object_bytes = _git_bytes(
+        "cat-file", "blob", f"{execution_head}:{LAUNCH_MARKER_REPOSITORY_PATH}"
+    )
+    _require(
+        worktree_bytes == object_bytes,
+        "calibration launch marker differs from its committed Git object",
+    )
+    _marker_payload(
+        worktree_bytes,
+        preregistration=preregistration,
+        preregistration_sha256=preregistration_sha256,
+    )
+    return {
+        "preparation_git_head": preparation_head,
+        "execution_git_head": execution_head,
+        "launch_marker_repository_path": LAUNCH_MARKER_REPOSITORY_PATH,
+        "launch_marker_sha256": hashlib.sha256(worktree_bytes).hexdigest(),
+    }
+
+
+def _revalidate_execution_binding(
+    expected: Mapping[str, Any],
+    *,
+    preregistration: Mapping[str, Any],
+    preregistration_sha256: str,
+) -> None:
+    _require(
+        set(expected) == EXECUTION_BINDING_FIELDS,
+        "calibration execution binding fields drifted",
+    )
+    _require(
+        _establish_execution_binding(preregistration, preregistration_sha256)
+        == expected,
+        "calibration execution Git binding drifted",
+    )
+
+
+def _test_execution_binding(preregistration: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "preparation_git_head": preregistration.get("preparation_git_head"),
+        "execution_git_head": None,
+        "launch_marker_repository_path": LAUNCH_MARKER_REPOSITORY_PATH,
+        "launch_marker_sha256": None,
+    }
+
+
+@contextmanager
+def _campaign_execution_lock(root: Path) -> Iterator[None]:
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise CalibrationCampaignError(
+                "calibration campaign is already executing under another launcher"
+            ) from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _reject_loader_injection(environment: Mapping[str, str]) -> None:
+    present = [name for name in LOADER_INJECTION_VARIABLES if name in environment]
+    _require(
+        not present,
+        f"loader injection environment is forbidden: {','.join(present)}",
+    )
+
+
+def _fresh_validate_nvidia_bundle(config: CampaignConfig) -> BundleValidation:
+    """Reconstruct the closed bundle and bind both independent digests."""
+
+    _reject_loader_injection(os.environ)
+    try:
+        validation = validate_bundle(
+            config.nvidia_userspace_bundle_root,
+            expected_manifest_sha256=(
+                config.expected_nvidia_userspace_bundle_manifest_sha256
+            ),
+        )
+    except (NvidiaUserspaceBundleError, OSError) as exc:
+        raise CalibrationCampaignError(
+            f"NVIDIA userspace bundle validation failed: {exc}"
+        ) from exc
+    _require(
+        validation.kernel_module_version == config.expected_nvidia_driver_version,
+        "loaded NVIDIA driver version differs from campaign freeze",
+    )
+    _require(
+        validation.manifest_sha256
+        == config.expected_nvidia_userspace_bundle_manifest_sha256,
+        "NVIDIA userspace bundle manifest digest drifted",
+    )
+    _require(
+        validation.content_digest
+        == config.expected_nvidia_userspace_bundle_content_digest,
+        "NVIDIA userspace bundle content digest drifted",
+    )
+    library_path = str(validation.library_path)
+    _require(
+        library_path and ":" not in library_path,
+        "NVIDIA bundle library path cannot be represented in LD_LIBRARY_PATH",
+    )
+    return validation
+
+
+def _require_bundle_unchanged(
+    before: BundleValidation,
+    after: BundleValidation,
+    *,
+    boundary: str,
+) -> None:
+    _require(
+        after == before,
+        f"NVIDIA userspace bundle filesystem identity changed {boundary}",
+    )
 
 
 def _fsync_directory(path: Path) -> None:
@@ -222,16 +515,28 @@ def _verify_frozen_files(entries: Mapping[str, Mapping[str, Any]]) -> None:
         )
 
 
-def _runner_environment(cuda_device: int) -> dict[str, str]:
+def _runner_environment(
+    cuda_device: int,
+    *,
+    nvidia_library_path: Path | None = None,
+) -> dict[str, str]:
     environment = dict(os.environ)
     for key in tuple(environment):
-        if key.startswith("VLLM_"):
+        if key.startswith("VLLM_") or key in LOADER_INJECTION_VARIABLES:
             del environment[key]
+    ld_library_path = BASE_LD_LIBRARY_PATH
+    if nvidia_library_path is not None:
+        library_path = str(nvidia_library_path)
+        _require(
+            library_path and ":" not in library_path,
+            "NVIDIA bundle library path cannot be represented in LD_LIBRARY_PATH",
+        )
+        ld_library_path = f"{library_path}:{CUDA_LIBRARY_PATH}"
     environment.update(
         {
             "CUDA_VISIBLE_DEVICES": str(cuda_device),
             "HF_HUB_OFFLINE": "1",
-            "LD_LIBRARY_PATH": BASE_LD_LIBRARY_PATH,
+            "LD_LIBRARY_PATH": ld_library_path,
             "PYTHONNOUSERSITE": "1",
             "PYTHONPATH": str(INTEGRATION_ROOT),
             "TOKENIZERS_PARALLELISM": "false",
@@ -438,11 +743,59 @@ def _artifact_inventory(path: Path) -> list[dict[str, Any]]:
     return inventory
 
 
+def _validate_run_nvidia_binding(
+    provenance: Mapping[str, Any],
+    *,
+    config: CampaignConfig,
+    bundle_validation: BundleValidation,
+    run_name: str,
+) -> None:
+    capture = provenance.get("nvidia_driver_userspace")
+    _require(
+        isinstance(capture, dict),
+        f"{run_name} lacks NVIDIA userspace provenance",
+    )
+    expected_scalars = {
+        "root": str(config.nvidia_userspace_bundle_root),
+        "expected_driver_version": config.expected_nvidia_driver_version,
+        "expected_content_digest": (
+            config.expected_nvidia_userspace_bundle_content_digest
+        ),
+        "kernel_module_version": config.expected_nvidia_driver_version,
+        "manifest_sha256": (config.expected_nvidia_userspace_bundle_manifest_sha256),
+        "content_digest": config.expected_nvidia_userspace_bundle_content_digest,
+    }
+    for field, expected in expected_scalars.items():
+        _require(
+            capture.get(field) == expected,
+            f"{run_name} NVIDIA userspace {field} differs from campaign freeze",
+        )
+    runtime = capture.get("runtime")
+    _require(
+        isinstance(runtime, dict),
+        f"{run_name} lacks NVIDIA runtime path provenance",
+    )
+    expected_runtime = {
+        "rootfs": str(bundle_validation.runtime.rootfs),
+        "library_directory": str(bundle_validation.runtime.library_directory),
+        "nvidia_smi": str(bundle_validation.runtime.nvidia_smi),
+        "libcuda": str(bundle_validation.runtime.libcuda),
+        "libnvidia_ml": str(bundle_validation.runtime.libnvidia_ml),
+    }
+    _require(
+        all(runtime.get(field) == value for field, value in expected_runtime.items()),
+        f"{run_name} NVIDIA runtime paths differ from campaign freeze",
+    )
+
+
 def _validate_completed_run(
     run_dir: Path,
     *,
     expected_implementation_manifest_sha256: str,
     expected_reproducibility_fingerprint: str,
+    config: CampaignConfig,
+    bundle_validation: BundleValidation,
+    expected_execution_git_head: str | None,
 ) -> dict[str, Any]:
     root_text = str(REPO_ROOT)
     if root_text not in sys.path:
@@ -495,6 +848,17 @@ def _validate_completed_run(
         f"{run_dir.name} reproducibility fingerprint drifted: "
         f"{validated.reproducibility_fingerprint}",
     )
+    _validate_run_nvidia_binding(
+        provenance,
+        config=config,
+        bundle_validation=bundle_validation,
+        run_name=run_dir.name,
+    )
+    if expected_execution_git_head is not None:
+        _require(
+            validated.dagkv_git_head == expected_execution_git_head,
+            f"{run_dir.name} DAGKV Git HEAD differs from execution binding",
+        )
     return {
         "run_id": validated.run_id,
         "result_sha256": validated.result_sha256,
@@ -503,6 +867,8 @@ def _validate_completed_run(
         "implementation_manifest_sha256": observed_implementation,
         "reproducibility_fingerprint": validated.reproducibility_fingerprint,
         "observed_max_abs_error": validated.observed_max_abs_error,
+        "dagkv_git_head": validated.dagkv_git_head,
+        "dagkv_snapshot_sha256": validated.dagkv_snapshot_sha256,
     }
 
 
@@ -616,6 +982,14 @@ def _run_command(config: CampaignConfig, run_dir: Path) -> list[str]:
         str(config.model),
         "--vllm-root",
         str(config.vllm_root),
+        "--expected-nvidia-driver-version",
+        config.expected_nvidia_driver_version,
+        "--nvidia-userspace-bundle-root",
+        str(config.nvidia_userspace_bundle_root),
+        "--expected-nvidia-userspace-bundle-manifest-sha256",
+        config.expected_nvidia_userspace_bundle_manifest_sha256,
+        "--expected-nvidia-userspace-bundle-content-digest",
+        config.expected_nvidia_userspace_bundle_content_digest,
         "--cpu-bytes",
         str(config.cpu_bytes),
         "--timeout-s",
@@ -695,7 +1069,11 @@ def _selection_rule(run_names: Sequence[str]) -> dict[str, Any]:
 
 def _normalized_config(
     config: CampaignConfig,
-) -> tuple[CampaignConfig, dict[str, dict[str, Any]]]:
+) -> tuple[
+    CampaignConfig,
+    dict[str, dict[str, Any]],
+    BundleValidation,
+]:
     expected_implementation = _validate_digest(
         config.expected_implementation_manifest_sha256,
         label="expected implementation manifest",
@@ -703,6 +1081,19 @@ def _normalized_config(
     expected_fingerprint = _validate_digest(
         config.expected_reproducibility_fingerprint,
         label="expected reproducibility fingerprint",
+    )
+    expected_bundle_manifest = _validate_digest(
+        config.expected_nvidia_userspace_bundle_manifest_sha256,
+        label="expected NVIDIA userspace bundle manifest",
+    )
+    expected_bundle_content = _validate_digest(
+        config.expected_nvidia_userspace_bundle_content_digest,
+        label="expected NVIDIA userspace bundle content",
+    )
+    _require(
+        isinstance(config.expected_nvidia_driver_version, str)
+        and config.expected_nvidia_driver_version,
+        "expected NVIDIA driver version must be a nonempty string",
     )
     _require(
         type(config.cpu_bytes) is int and config.cpu_bytes > 0,
@@ -732,6 +1123,10 @@ def _normalized_config(
         EVIDENCE_VALIDATOR_PATH, label="calibration evidence validator"
     )
     raw_replay = _resolved_file(RAW_REPLAY_PATH, label="raw replay validator")
+    nvidia_bundle_validator = _resolved_file(
+        NVIDIA_BUNDLE_VALIDATOR_PATH,
+        label="NVIDIA userspace bundle validator",
+    )
     protocol = _resolved_file(PROTOCOL_PATH, label="protocol")
     launcher = _resolved_file(LAUNCHER_PATH, label="launcher")
     # Preserve the venv entry-point path. Resolving its symlink would invoke the
@@ -742,9 +1137,12 @@ def _normalized_config(
     model = config.model.expanduser().resolve()
     vllm_root = config.vllm_root.expanduser().resolve()
     campaign_root = config.campaign_root.expanduser().resolve()
+    bundle_root = Path(
+        os.path.abspath(config.nvidia_userspace_bundle_root.expanduser())
+    )
     _require(model.is_dir(), f"model directory is missing: {model}")
     _require(vllm_root.is_dir(), f"vLLM root is missing: {vllm_root}")
-    for protected in (REPO_ROOT.resolve(), model, vllm_root):
+    for protected in (REPO_ROOT.resolve(), model, vllm_root, bundle_root):
         _require(
             campaign_root != protected and not campaign_root.is_relative_to(protected),
             f"campaign root is inside protected input root: {protected}",
@@ -754,6 +1152,10 @@ def _normalized_config(
         campaign_root=campaign_root,
         expected_implementation_manifest_sha256=expected_implementation,
         expected_reproducibility_fingerprint=expected_fingerprint,
+        nvidia_userspace_bundle_root=bundle_root,
+        expected_nvidia_driver_version=config.expected_nvidia_driver_version,
+        expected_nvidia_userspace_bundle_manifest_sha256=(expected_bundle_manifest),
+        expected_nvidia_userspace_bundle_content_digest=expected_bundle_content,
         python_executable=python_executable,
         runner=runner,
         aggregator=aggregator,
@@ -767,6 +1169,11 @@ def _normalized_config(
         kill_wait_s=float(config.kill_wait_s),
         cuda_device=config.cuda_device,
     )
+    bundle_validation = _fresh_validate_nvidia_bundle(normalized)
+    _require(
+        bundle_validation.runtime.rootfs.parent == bundle_root,
+        "validated NVIDIA bundle rootfs binding drifted",
+    )
     frozen_files = {
         "protocol": _frozen_file_entry(protocol),
         "runner": _frozen_file_entry(runner),
@@ -774,23 +1181,31 @@ def _normalized_config(
         "aggregator": _frozen_file_entry(aggregator),
         "evidence": _frozen_file_entry(evidence_validator),
         "raw_replay": _frozen_file_entry(raw_replay),
+        "nvidia_bundle_validator": _frozen_file_entry(nvidia_bundle_validator),
     }
-    return normalized, frozen_files
+    return normalized, frozen_files, bundle_validation
 
 
 def _preregistration_payload(
     config: CampaignConfig,
     frozen_files: Mapping[str, Mapping[str, Any]],
+    bundle_validation: BundleValidation,
     *,
     expected_runs: int,
+    preparation_git_head: str | None,
 ) -> dict[str, Any]:
     run_names = [f"run-{index:03d}" for index in range(1, expected_runs + 1)]
-    environment = _runner_environment(config.cuda_device)
+    environment = _runner_environment(
+        config.cuda_device,
+        nvidia_library_path=bundle_validation.library_path,
+    )
     return {
         "schema_version": CAMPAIGN_SCHEMA,
         "campaign_id": f"m2-calibration-{uuid.uuid4().hex}",
         "campaign_root": str(config.campaign_root),
         "created_at_utc": _utc_now(),
+        "preparation_git_head": preparation_git_head,
+        "launch_marker_repository_path": LAUNCH_MARKER_REPOSITORY_PATH,
         "protocol_schema": PROTOCOL_SCHEMA,
         "protocol_sha256": frozen_files["protocol"]["sha256"],
         "expected_runs": expected_runs,
@@ -806,6 +1221,14 @@ def _preregistration_payload(
         ),
         "expected_reproducibility_fingerprint": (
             config.expected_reproducibility_fingerprint
+        ),
+        "nvidia_userspace_bundle_root": str(config.nvidia_userspace_bundle_root),
+        "expected_nvidia_driver_version": config.expected_nvidia_driver_version,
+        "expected_nvidia_userspace_bundle_manifest_sha256": (
+            config.expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        "expected_nvidia_userspace_bundle_content_digest": (
+            config.expected_nvidia_userspace_bundle_content_digest
         ),
         "frozen_files": dict(frozen_files),
         "python_executable": _frozen_file_entry(config.python_executable),
@@ -846,7 +1269,12 @@ def prepare_campaign(
     """Create and fsync the sole preregistration artifact for a fresh root."""
 
     _validate_expected_runs(_expected_runs)
-    frozen_config, frozen_files = _normalized_config(config)
+    preparation_git_head = (
+        _clean_git_head(phase="calibration preparation")
+        if _expected_runs == PRODUCTION_RUN_COUNT
+        else None
+    )
+    frozen_config, frozen_files, bundle_validation = _normalized_config(config)
     campaign_root = frozen_config.campaign_root
     _require(
         not os.path.lexists(campaign_root),
@@ -859,14 +1287,33 @@ def prepare_campaign(
     preregistration = _preregistration_payload(
         frozen_config,
         frozen_files,
+        bundle_validation,
         expected_runs=_expected_runs,
+        preparation_git_head=preparation_git_head,
     )
 
     campaign_root.mkdir(mode=0o750)
     _fsync_directory(campaign_root.parent)
     preregistration_path = campaign_root / PREREGISTRATION_NAME
     _write_json_atomic(preregistration_path, preregistration)
-    return _sha256_file(preregistration_path)
+    preregistration_sha256 = _sha256_file(preregistration_path)
+    _verify_frozen_files(frozen_files)
+    if _expected_runs == PRODUCTION_RUN_COUNT:
+        _require(
+            _clean_git_head(phase="calibration preparation") == preparation_git_head,
+            "DAGKV Git HEAD changed during calibration preparation",
+        )
+    bundle_after = _fresh_validate_nvidia_bundle(frozen_config)
+    _require_bundle_unchanged(
+        bundle_validation,
+        bundle_after,
+        boundary="during campaign preparation",
+    )
+    _require(
+        _sha256_file(preregistration_path) == preregistration_sha256,
+        "campaign preregistration changed during preparation postflight",
+    )
+    return preregistration_sha256
 
 
 def _prepared_campaign(
@@ -885,7 +1332,12 @@ def _prepared_campaign(
         expected_preregistration_sha256,
         label="expected preregistration",
     )
-    root = campaign_root.expanduser().resolve()
+    supplied_root = campaign_root.expanduser()
+    _require(
+        not supplied_root.is_symlink(),
+        f"campaign root cannot be a symlink: {supplied_root}",
+    )
+    root = supplied_root.resolve()
     _require(root.is_dir() and not root.is_symlink(), f"invalid campaign root: {root}")
     entries = sorted(entry.name for entry in root.iterdir())
     _require(
@@ -913,6 +1365,11 @@ def _prepared_campaign(
         preregistration.get("protocol_schema") == PROTOCOL_SCHEMA,
         "prepared protocol schema drifted",
     )
+    _require(
+        preregistration.get("launch_marker_repository_path")
+        == LAUNCH_MARKER_REPOSITORY_PATH,
+        "calibration launch marker path drifted",
+    )
     run_names = [f"run-{index:03d}" for index in range(1, expected_runs + 1)]
     _require(
         preregistration.get("expected_runs") == expected_runs
@@ -922,6 +1379,14 @@ def _prepared_campaign(
         "prepared run-count freeze drifted",
     )
     _require(preregistration.get("run_names") == run_names, "run names drifted")
+    preparation_head = preregistration.get("preparation_git_head")
+    if expected_runs == PRODUCTION_RUN_COUNT:
+        _validate_git_head(preparation_head, label="prepared Git HEAD")
+    else:
+        _require(
+            preparation_head is None,
+            "test-injected calibration campaign cannot carry a production Git head",
+        )
     _require(
         preregistration.get("calibration_attempt_prefix_record_count")
         == expected_runs * 2,
@@ -955,6 +1420,18 @@ def _prepared_campaign(
             expected_reproducibility_fingerprint=preregistration[
                 "expected_reproducibility_fingerprint"
             ],
+            nvidia_userspace_bundle_root=Path(
+                preregistration["nvidia_userspace_bundle_root"]
+            ),
+            expected_nvidia_driver_version=preregistration[
+                "expected_nvidia_driver_version"
+            ],
+            expected_nvidia_userspace_bundle_manifest_sha256=preregistration[
+                "expected_nvidia_userspace_bundle_manifest_sha256"
+            ],
+            expected_nvidia_userspace_bundle_content_digest=preregistration[
+                "expected_nvidia_userspace_bundle_content_digest"
+            ],
             python_executable=Path(preregistration["python_executable"]["path"]),
             runner=Path(preregistration["frozen_files"]["runner"]["path"]),
             aggregator=Path(preregistration["frozen_files"]["aggregator"]["path"]),
@@ -972,7 +1449,7 @@ def _prepared_campaign(
         raise CalibrationCampaignError(
             f"prepared campaign configuration is malformed: {exc}"
         ) from exc
-    frozen_config, frozen_files = _normalized_config(prepared_config)
+    frozen_config, frozen_files, bundle_validation = _normalized_config(prepared_config)
     _require(
         preregistration.get("frozen_files") == frozen_files,
         "prepared frozen-file inventory drifted",
@@ -991,7 +1468,10 @@ def _prepared_campaign(
         == _run_command(frozen_config, Path("<RUN_DIR>")),
         "prepared runner command drifted",
     )
-    environment = _runner_environment(frozen_config.cuda_device)
+    environment = _runner_environment(
+        frozen_config.cuda_device,
+        nvidia_library_path=bundle_validation.library_path,
+    )
     environment_keys = (
         "CUDA_VISIBLE_DEVICES",
         "HF_HUB_OFFLINE",
@@ -1029,6 +1509,7 @@ def _sealed_calibration_prefix(
     campaign_id: str,
     run_names: Sequence[str],
     preregistration_sha256: str,
+    execution_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     _require(
         attempts_path.is_file() and not attempts_path.is_symlink(),
@@ -1063,7 +1544,8 @@ def _sealed_calibration_prefix(
             )
         _require(
             submitted.get("event") == "submitted"
-            and submitted.get("preregistration_sha256") == preregistration_sha256,
+            and submitted.get("preregistration_sha256") == preregistration_sha256
+            and submitted.get("execution_binding") == execution_binding,
             f"submitted record drifted for {run_name}",
         )
         _require(
@@ -1080,7 +1562,7 @@ def _sealed_calibration_prefix(
     }
 
 
-def execute_prepared_campaign(
+def _execute_prepared_campaign_locked(
     campaign_root: Path,
     expected_preregistration_sha256: str,
     *,
@@ -1099,7 +1581,13 @@ def execute_prepared_campaign(
     preregistration_path = root / PREREGISTRATION_NAME
     campaign_id = preregistration["campaign_id"]
     run_names = preregistration["run_names"]
-    environment = _runner_environment(config.cuda_device)
+    production = _expected_runs == PRODUCTION_RUN_COUNT
+    execution_binding = (
+        _establish_execution_binding(preregistration, preregistration_sha256)
+        if production
+        else _test_execution_binding(preregistration)
+    )
+    completed_validations: list[dict[str, Any]] = []
 
     for sequence, run_name in enumerate(run_names, start=1):
         _verify_frozen_files(frozen_files)
@@ -1107,12 +1595,23 @@ def execute_prepared_campaign(
             _sha256_file(preregistration_path) == preregistration_sha256,
             "campaign preregistration changed after execution began",
         )
+        if production:
+            _revalidate_execution_binding(
+                execution_binding,
+                preregistration=preregistration,
+                preregistration_sha256=preregistration_sha256,
+            )
         run_dir, stdout_path, stderr_path = _campaign_paths(root, run_name)
         _require(
             not os.path.lexists(run_dir)
             and not os.path.lexists(stdout_path)
             and not os.path.lexists(stderr_path),
             f"fresh run paths already exist: {run_name}",
+        )
+        bundle_before = _fresh_validate_nvidia_bundle(config)
+        environment = _runner_environment(
+            config.cuda_device,
+            nvidia_library_path=bundle_before.library_path,
         )
         command = _run_command(config, run_dir)
         submitted = {
@@ -1129,6 +1628,7 @@ def execute_prepared_campaign(
             "stdout": stdout_path.name,
             "stderr": stderr_path.name,
             "preregistration_sha256": preregistration_sha256,
+            "execution_binding": dict(execution_binding),
         }
         _append_attempt(attempts_path, submitted)
 
@@ -1146,6 +1646,21 @@ def execute_prepared_campaign(
         except (OSError, CalibrationCampaignError) as exc:
             if isinstance(exc, ProcessExecutionInterrupted):
                 outcome = exc.outcome
+            postflight_error: str | None = None
+            try:
+                bundle_after = _fresh_validate_nvidia_bundle(config)
+                _require_bundle_unchanged(
+                    bundle_before,
+                    bundle_after,
+                    boundary=f"while {run_name} was active",
+                )
+            except CalibrationCampaignError as bundle_exc:
+                postflight_error = str(bundle_exc)
+            error = str(exc)
+            if postflight_error is not None:
+                error = (
+                    f"{error}; post-run bundle validation failed: {postflight_error}"
+                )
             terminal = _terminal_payload(
                 submitted,
                 status=(
@@ -1157,12 +1672,32 @@ def execute_prepared_campaign(
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 artifact_path=run_dir,
-                error=str(exc),
+                error=error,
             )
             _append_attempt(attempts_path, terminal)
             raise CalibrationCampaignError(
-                f"{run_name} could not reach a process terminal: {exc}"
+                f"{run_name} could not reach a process terminal: {error}"
             ) from exc
+
+        try:
+            bundle_after = _fresh_validate_nvidia_bundle(config)
+            _require_bundle_unchanged(
+                bundle_before,
+                bundle_after,
+                boundary=f"while {run_name} was active",
+            )
+        except CalibrationCampaignError as exc:
+            terminal = _terminal_payload(
+                submitted,
+                status="validation_failed",
+                outcome=outcome,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                artifact_path=run_dir,
+                error=f"post-run bundle validation failed: {exc}",
+            )
+            _append_attempt(attempts_path, terminal)
+            raise
 
         if outcome.timed_out:
             terminal = _terminal_payload(
@@ -1217,6 +1752,11 @@ def execute_prepared_campaign(
                 expected_reproducibility_fingerprint=(
                     config.expected_reproducibility_fingerprint
                 ),
+                config=config,
+                bundle_validation=bundle_after,
+                expected_execution_git_head=(
+                    execution_binding["execution_git_head"] if production else None
+                ),
             )
         except CalibrationCampaignError as exc:
             terminal = _terminal_payload(
@@ -1231,6 +1771,8 @@ def execute_prepared_campaign(
             _append_attempt(attempts_path, terminal)
             raise
 
+        completed_validations.append(validation)
+
         terminal = _terminal_payload(
             submitted,
             status="passed",
@@ -1242,11 +1784,28 @@ def execute_prepared_campaign(
         )
         _append_attempt(attempts_path, terminal)
 
+    if production:
+        _require(
+            len({row["dagkv_snapshot_sha256"] for row in completed_validations}) == 1,
+            "calibration runs do not share one frozen DAGKV snapshot",
+        )
+    bundle_before_aggregate = _fresh_validate_nvidia_bundle(config)
+    if production:
+        _revalidate_execution_binding(
+            execution_binding,
+            preregistration=preregistration,
+            preregistration_sha256=preregistration_sha256,
+        )
+    environment = _runner_environment(
+        config.cuda_device,
+        nvidia_library_path=bundle_before_aggregate.library_path,
+    )
     calibration_prefix = _sealed_calibration_prefix(
         attempts_path,
         campaign_id=campaign_id,
         run_names=run_names,
         preregistration_sha256=preregistration_sha256,
+        execution_binding=execution_binding,
     )
     _verify_frozen_files(frozen_files)
     aggregate_stdout = root / "aggregate.stdout.log"
@@ -1272,6 +1831,7 @@ def execute_prepared_campaign(
         "stderr": aggregate_stderr.name,
         "preregistration_sha256": preregistration_sha256,
         "calibration_prefix": calibration_prefix,
+        "execution_binding": dict(execution_binding),
     }
     _append_attempt(attempts_path, aggregate_submitted)
     aggregate_outcome: ProcessOutcome | None = None
@@ -1288,6 +1848,21 @@ def execute_prepared_campaign(
     except (OSError, CalibrationCampaignError) as exc:
         if isinstance(exc, ProcessExecutionInterrupted):
             aggregate_outcome = exc.outcome
+        postflight_error = None
+        try:
+            bundle_after_aggregate = _fresh_validate_nvidia_bundle(config)
+            _require_bundle_unchanged(
+                bundle_before_aggregate,
+                bundle_after_aggregate,
+                boundary="while aggregation was active",
+            )
+        except CalibrationCampaignError as bundle_exc:
+            postflight_error = str(bundle_exc)
+        error = str(exc)
+        if postflight_error is not None:
+            error = (
+                f"{error}; post-aggregate bundle validation failed: {postflight_error}"
+            )
         terminal = _terminal_payload(
             aggregate_submitted,
             status=(
@@ -1299,12 +1874,32 @@ def execute_prepared_campaign(
             stdout_path=aggregate_stdout,
             stderr_path=aggregate_stderr,
             artifact_path=cohort_path,
-            error=str(exc),
+            error=error,
         )
         _append_attempt(attempts_path, terminal)
         raise CalibrationCampaignError(
-            f"aggregation could not terminate: {exc}"
+            f"aggregation could not terminate: {error}"
         ) from exc
+
+    try:
+        bundle_after_aggregate = _fresh_validate_nvidia_bundle(config)
+        _require_bundle_unchanged(
+            bundle_before_aggregate,
+            bundle_after_aggregate,
+            boundary="while aggregation was active",
+        )
+    except CalibrationCampaignError as exc:
+        terminal = _terminal_payload(
+            aggregate_submitted,
+            status="validation_failed",
+            outcome=aggregate_outcome,
+            stdout_path=aggregate_stdout,
+            stderr_path=aggregate_stderr,
+            artifact_path=cohort_path,
+            error=f"post-aggregate bundle validation failed: {exc}",
+        )
+        _append_attempt(attempts_path, terminal)
+        raise
 
     if aggregate_outcome.timed_out or aggregate_outcome.exit_code != 0:
         status = "timed_out" if aggregate_outcome.timed_out else "process_failed"
@@ -1349,6 +1944,11 @@ def execute_prepared_campaign(
             ),
         )
         if _expected_runs == PRODUCTION_RUN_COUNT:
+            _revalidate_execution_binding(
+                execution_binding,
+                preregistration=preregistration,
+                preregistration_sha256=preregistration_sha256,
+            )
             _revalidate_production_candidate(
                 cohort_path,
                 expected_implementation_manifest_sha256=(
@@ -1384,13 +1984,47 @@ def execute_prepared_campaign(
     )
     _append_attempt(attempts_path, terminal)
     if _expected_runs == PRODUCTION_RUN_COUNT:
+        _revalidate_execution_binding(
+            execution_binding,
+            preregistration=preregistration,
+            preregistration_sha256=preregistration_sha256,
+        )
         _revalidate_production_bundle(
             cohort_path,
             expected_implementation_manifest_sha256=(
                 config.expected_implementation_manifest_sha256
             ),
         )
+    final_bundle = _fresh_validate_nvidia_bundle(config)
+    _require_bundle_unchanged(
+        bundle_after_aggregate,
+        final_bundle,
+        boundary="during final campaign replay",
+    )
     return cohort
+
+
+def execute_prepared_campaign(
+    campaign_root: Path,
+    expected_preregistration_sha256: str,
+    *,
+    _expected_runs: int = PRODUCTION_RUN_COUNT,
+) -> dict[str, Any]:
+    """Execute a pristine prepared campaign under a non-blocking root lock."""
+
+    supplied_root = campaign_root.expanduser()
+    _require(
+        not supplied_root.is_symlink(),
+        f"campaign root cannot be a symlink: {supplied_root}",
+    )
+    root = supplied_root.resolve()
+    _require(root.is_dir() and not root.is_symlink(), f"invalid campaign root: {root}")
+    with _campaign_execution_lock(root):
+        return _execute_prepared_campaign_locked(
+            root,
+            expected_preregistration_sha256,
+            _expected_runs=_expected_runs,
+        )
 
 
 def run_campaign(
@@ -1422,6 +2056,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--expected-reproducibility-fingerprint",
+    )
+    parser.add_argument("--nvidia-userspace-bundle-root", type=Path)
+    parser.add_argument("--expected-nvidia-driver-version")
+    parser.add_argument(
+        "--expected-nvidia-userspace-bundle-manifest-sha256",
+    )
+    parser.add_argument(
+        "--expected-nvidia-userspace-bundle-content-digest",
     )
     parser.add_argument(
         "--expected-preregistration-sha256",
@@ -1466,10 +2108,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (
         args.expected_implementation_manifest_sha256 is None
         or args.expected_reproducibility_fingerprint is None
+        or args.nvidia_userspace_bundle_root is None
+        or args.expected_nvidia_driver_version is None
+        or args.expected_nvidia_userspace_bundle_manifest_sha256 is None
+        or args.expected_nvidia_userspace_bundle_content_digest is None
     ):
         parser.error(
-            "campaign preparation requires both expected implementation and "
-            "reproducibility SHA-256 values"
+            "campaign preparation requires implementation, reproducibility, and "
+            "NVIDIA userspace bundle root/manifest/content identities"
         )
     if args.expected_preregistration_sha256 is not None:
         parser.error(
@@ -1482,6 +2128,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         expected_reproducibility_fingerprint=(
             args.expected_reproducibility_fingerprint
+        ),
+        nvidia_userspace_bundle_root=args.nvidia_userspace_bundle_root,
+        expected_nvidia_driver_version=args.expected_nvidia_driver_version,
+        expected_nvidia_userspace_bundle_manifest_sha256=(
+            args.expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        expected_nvidia_userspace_bundle_content_digest=(
+            args.expected_nvidia_userspace_bundle_content_digest
         ),
         python_executable=args.python_executable,
         runner=args.runner,

@@ -16,6 +16,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -24,7 +25,7 @@ import tarfile
 import time
 import traceback
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from importlib import metadata as importlib_metadata
@@ -41,6 +42,11 @@ try:
         read_stable_bytes,
         validate_published_calibration_bundle,
     )
+    from tools.nvidia_driver_userspace_bundle import (
+        BundleValidation,
+        NvidiaUserspaceBundleError,
+        validate_bundle,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "tools":
         raise
@@ -53,8 +59,13 @@ except ModuleNotFoundError as exc:
         read_stable_bytes,
         validate_published_calibration_bundle,
     )
+    from nvidia_driver_userspace_bundle import (  # type: ignore[no-redef]
+        BundleValidation,
+        NvidiaUserspaceBundleError,
+        validate_bundle,
+    )
 
-PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v2"
+PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v3"
 DIAGNOSTIC_SCHEMA = "dagkv.vllm_m2.transfer_probe.v1"
 TOLERANCE_SCHEMA = "dagkv.m2.frozen_tolerance.v2"
 ITEM8_FORMAL_RUN_SCHEMA = "dagkv.m2.item8.formal_run.v1"
@@ -71,6 +82,7 @@ DEFAULT_VLLM_ROOT = Path("/home/data/25_oyzx/Agentrix/vllm")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INTEGRATION_ROOT = REPO_ROOT / "integrations" / "vllm_m2"
 PROTOCOL_SOURCE = REPO_ROOT / "research" / "protocols" / ("M2_VLLM_REPLAY_PROTOCOL.md")
+LOADER_INJECTION_VARIABLES = ("LD_AUDIT", "LD_PRELOAD")
 
 
 class M2ValidationError(RuntimeError):
@@ -156,6 +168,193 @@ def sha256_file(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _lower_sha256(value: str, *, label: str) -> str:
+    require(
+        len(value) == 64
+        and all(character in "0123456789abcdef" for character in value),
+        f"{label} must be a lowercase SHA-256 digest",
+    )
+    return value
+
+
+def _driver_version(value: str, *, label: str) -> str:
+    require(
+        re.fullmatch(r"[0-9]+(?:\.[0-9]+){2,}", value) is not None,
+        f"{label} must be a dotted numeric NVIDIA driver version",
+    )
+    return value
+
+
+def _reject_loader_injection(
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    """Reject process-wide loader injection that invalidates binary provenance."""
+
+    observed = os.environ if environment is None else environment
+    present = [name for name in LOADER_INJECTION_VARIABLES if name in observed]
+    require(
+        not present,
+        f"loader injection environment is forbidden: {','.join(present)}",
+    )
+
+
+def _validate_nvidia_bundle(
+    bundle_root: Path,
+    *,
+    expected_manifest_sha256: str,
+    expected_content_digest: str,
+    expected_driver_version: str,
+) -> BundleValidation:
+    """Freshly validate and bind one exact NVIDIA userspace bundle."""
+
+    expected_manifest = _lower_sha256(
+        expected_manifest_sha256,
+        label="expected NVIDIA userspace bundle manifest SHA-256",
+    )
+    expected_content = _lower_sha256(
+        expected_content_digest,
+        label="expected NVIDIA userspace bundle content digest",
+    )
+    expected_version = _driver_version(
+        expected_driver_version,
+        label="expected NVIDIA driver version",
+    )
+    try:
+        validation = validate_bundle(
+            bundle_root,
+            expected_manifest_sha256=expected_manifest,
+        )
+    except (NvidiaUserspaceBundleError, OSError) as exc:
+        raise M2ValidationError(
+            f"NVIDIA userspace bundle validation failed: {exc}"
+        ) from exc
+    require(
+        validation.manifest_sha256 == expected_manifest,
+        "NVIDIA userspace bundle manifest SHA-256 differs from CLI expectation",
+    )
+    require(
+        validation.content_digest == expected_content,
+        "NVIDIA userspace bundle content digest differs from CLI expectation",
+    )
+    require(
+        validation.kernel_module_version == expected_version,
+        "NVIDIA kernel module version differs from CLI expectation",
+    )
+    library_path = str(validation.library_path)
+    loader_path = os.environ.get("LD_LIBRARY_PATH", "").split(":", maxsplit=1)[0]
+    require(
+        loader_path == library_path,
+        "LD_LIBRARY_PATH must begin with the validated NVIDIA bundle library path",
+    )
+    return validation
+
+
+def _capture_loaded_libcuda(
+    validation: BundleValidation,
+    *,
+    maps_path: Path = Path("/proc/self/maps"),
+) -> dict[str, Any]:
+    """Prove the CUDA driver mapped by this process is the bundled library."""
+
+    try:
+        raw = maps_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise M2ValidationError(f"cannot read process library mappings: {exc}") from exc
+    mappings: list[tuple[str, str, str, int]] = []
+    for line_number, line in enumerate(raw.splitlines(), start=1):
+        fields = line.split(maxsplit=5)
+        if len(fields) != 6:
+            continue
+        pathname = fields[5]
+        name = Path(pathname.removesuffix(" (deleted)")).name
+        if name != "libcuda.so" and not name.startswith("libcuda.so."):
+            continue
+        require(
+            not pathname.endswith(" (deleted)"),
+            "mapped libcuda was deleted after loading",
+        )
+        mappings.append((pathname, fields[3], fields[4], line_number))
+    require(mappings, "CUDA initialization did not map libcuda")
+    unique_paths = {path for path, _, _, _ in mappings}
+    require(
+        len(unique_paths) == 1,
+        f"multiple libcuda implementations are mapped: {sorted(unique_paths)}",
+    )
+    mapped_path = Path(next(iter(unique_paths)))
+    require(mapped_path.is_absolute(), "mapped libcuda path is not absolute")
+    try:
+        resolved = mapped_path.resolve(strict=True)
+        expected = validation.libcuda_path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise M2ValidationError(f"cannot resolve mapped libcuda: {exc}") from exc
+    require(
+        resolved == expected,
+        "mapped libcuda does not come from the validated bundle",
+    )
+    require(
+        resolved.is_relative_to(validation.runtime.rootfs),
+        "mapped libcuda escapes the validated bundle rootfs",
+    )
+    observed = resolved.stat()
+    map_inodes = {inode for _, _, inode, _ in mappings}
+    require(
+        map_inodes == {str(observed.st_ino)},
+        "mapped libcuda inode differs from the bundled file",
+    )
+    try:
+        map_devices = {
+            os.makedev(*(int(value, 16) for value in device.split(":")))
+            for _, device, _, _ in mappings
+        }
+    except (TypeError, ValueError) as exc:
+        raise M2ValidationError("mapped libcuda device identity is invalid") from exc
+    require(
+        map_devices == {observed.st_dev},
+        "mapped libcuda device differs from the bundled file",
+    )
+    return {
+        "path": str(mapped_path),
+        "resolved_path": str(resolved),
+        "rootfs_relative_path": resolved.relative_to(
+            validation.runtime.rootfs
+        ).as_posix(),
+        "device": observed.st_dev,
+        "inode": observed.st_ino,
+        "size": observed.st_size,
+        "sha256": sha256_file(resolved),
+        "mapping_count": len(mappings),
+    }
+
+
+def _nvidia_bundle_capture(
+    validation: BundleValidation,
+    *,
+    bundle_root: Path,
+    expected_manifest_sha256: str,
+    expected_content_digest: str,
+    expected_driver_version: str,
+    libcuda_mapping: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "root": str(bundle_root.resolve()),
+        "expected_manifest_sha256": expected_manifest_sha256,
+        "expected_content_digest": expected_content_digest,
+        "expected_driver_version": expected_driver_version,
+        "manifest": dict(validation.manifest),
+        "manifest_sha256": validation.manifest_sha256,
+        "content_digest": validation.content_digest,
+        "kernel_module_version": validation.kernel_module_version,
+        "runtime": {
+            "rootfs": str(validation.runtime.rootfs),
+            "library_directory": str(validation.library_path),
+            "nvidia_smi": str(validation.nvidia_smi_path),
+            "libcuda": str(validation.libcuda_path),
+            "libnvidia_ml": str(validation.runtime.libnvidia_ml),
+        },
+        "libcuda_mapping": libcuda_mapping,
+    }
 
 
 def read_jsonl_strict(path: Path) -> list[dict[str, Any]]:
@@ -1265,6 +1464,7 @@ def _implementation_capture() -> dict[str, Any]:
         REPO_ROOT / "tools" / "freeze_m2_tolerance.py",
         REPO_ROOT / "tools" / "m2_calibration_evidence.py",
         REPO_ROOT / "tools" / "m2_raw_replay.py",
+        REPO_ROOT / "tools" / "nvidia_driver_userspace_bundle.py",
         REPO_ROOT / "tools" / "run_m2_calibration_campaign.py",
     }
     for root in (REPO_ROOT / "src", INTEGRATION_ROOT / "dagkv_vllm_m2"):
@@ -1499,12 +1699,12 @@ def _dependency_capture() -> dict[str, Any]:
     return {"packages": entries, "manifest_sha256": _canonical_digest(entries)}
 
 
-def _system_capture(torch: Any) -> dict[str, Any]:
+def _system_capture(torch: Any, *, nvidia_bundle: BundleValidation) -> dict[str, Any]:
     properties = torch.cuda.get_device_properties(0)
     try:
         smi = subprocess.run(
             [
-                "nvidia-smi",
+                str(nvidia_bundle.nvidia_smi_path),
                 "--query-gpu=uuid,driver_version,pci.bus_id,name,memory.total",
                 "--format=csv,noheader,nounits",
             ],
@@ -1518,6 +1718,13 @@ def _system_capture(torch: Any) -> dict[str, Any]:
         ) from exc
     require(
         smi and len(smi.splitlines()) == 1, "expected exactly one visible NVIDIA GPU"
+    )
+    smi_fields = [field.strip() for field in smi.split(",")]
+    require(len(smi_fields) == 5, "unexpected nvidia-smi identity field count")
+    require(
+        _driver_version(smi_fields[1], label="nvidia-smi driver version")
+        == nvidia_bundle.kernel_module_version,
+        "nvidia-smi driver version differs from the validated bundle",
     )
     try:
         os_release = platform.freedesktop_os_release()
@@ -1545,6 +1752,7 @@ def _system_capture(torch: Any) -> dict[str, Any]:
         "os_release": os_release,
         "gpu": {
             "nvidia_smi": smi,
+            "nvidia_smi_executable": str(nvidia_bundle.nvidia_smi_path),
             "name": properties.name,
             "compute_capability": [properties.major, properties.minor],
             "total_memory": properties.total_memory,
@@ -1719,13 +1927,18 @@ def _validate_engine_config(llm: Any) -> int:
     return vocab_size
 
 
-def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> None:
+def _run(
+    args: argparse.Namespace,
+    output_dir: Path,
+    run_started_ns: int,
+    nvidia_bundle: BundleValidation,
+) -> None:
     import numpy as np
 
     prompt_ids = validate_prompt_tokens(PROMPT_TOKEN_IDS)
     require(
         args.full_provenance,
-        "M2 v2 runs require --full-provenance",
+        "M2 v3 runs require --full-provenance",
     )
     implementation = _implementation_capture()
     frozen_tolerance: FrozenTolerance | None = None
@@ -1780,6 +1993,17 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
         model=args.model,
         vllm_root=args.vllm_root,
     )
+    libcuda_mapping = _capture_loaded_libcuda(nvidia_bundle)
+    nvidia_capture = _nvidia_bundle_capture(
+        nvidia_bundle,
+        bundle_root=args.nvidia_userspace_bundle_root,
+        expected_manifest_sha256=(
+            args.expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        expected_content_digest=(args.expected_nvidia_userspace_bundle_content_digest),
+        expected_driver_version=args.expected_nvidia_driver_version,
+        libcuda_mapping=libcuda_mapping,
+    )
 
     native_trace = output_dir / "native_lifecycle.jsonl"
     diagnostic_trace = output_dir / "diagnostic_transfers.jsonl"
@@ -1820,7 +2044,7 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
         full_hashes=args.full_provenance,
     )
     dependencies = _dependency_capture()
-    system = _system_capture(torch)
+    system = _system_capture(torch, nvidia_bundle=nvidia_bundle)
     static_connector_config = {
         key: value
         for key, value in connector_extra.items()
@@ -1836,6 +2060,7 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
         "model_manifest_sha256": model_capture["manifest_sha256"],
         "runtime_binary_manifest_sha256": runtime_binaries["manifest_sha256"],
         "dependency_manifest_sha256": dependencies["manifest_sha256"],
+        "nvidia_driver_userspace_content_digest": (nvidia_bundle.content_digest),
         "system": system,
         "prompt_token_ids": list(prompt_ids),
         "block_size": BLOCK_SIZE,
@@ -1884,6 +2109,7 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
         "model": model_capture,
         "runtime_binaries": runtime_binaries,
         "dependencies": dependencies,
+        "nvidia_driver_userspace": nvidia_capture,
         "system": system,
         "reproducibility_components": reproducibility_components,
         "reproducibility_fingerprint": reproducibility_fingerprint,
@@ -2192,6 +2418,22 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
     )
     _verify_file_stats(model_capture, kind="model")
     _verify_file_stats(runtime_binaries, kind="runtime_binaries")
+    post_nvidia_bundle = _validate_nvidia_bundle(
+        args.nvidia_userspace_bundle_root,
+        expected_manifest_sha256=(
+            args.expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        expected_content_digest=(args.expected_nvidia_userspace_bundle_content_digest),
+        expected_driver_version=args.expected_nvidia_driver_version,
+    )
+    require(
+        post_nvidia_bundle == nvidia_bundle,
+        "NVIDIA userspace bundle changed during run",
+    )
+    require(
+        _capture_loaded_libcuda(post_nvidia_bundle) == libcuda_mapping,
+        "mapped libcuda changed during run",
+    )
     provenance["postflight"] = {
         "completed_at_utc": datetime.now(UTC).isoformat(),
         "dagkv_git_snapshot_sha256": _verify_git_capture(dagkv_git, label="dagkv"),
@@ -2199,6 +2441,10 @@ def _run(args: argparse.Namespace, output_dir: Path, run_started_ns: int) -> Non
         "implementation_manifest_sha256": post_implementation["manifest_sha256"],
         "model_file_stats_unchanged": True,
         "runtime_binary_stats_unchanged": True,
+        "nvidia_driver_userspace_content_digest": (post_nvidia_bundle.content_digest),
+        "nvidia_driver_userspace_manifest_sha256": (post_nvidia_bundle.manifest_sha256),
+        "nvidia_driver_userspace_unchanged": True,
+        "libcuda_mapping_unchanged": True,
     }
     _write_json(output_dir / "provenance.json", provenance)
 
@@ -2284,6 +2530,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--rtol", type=float, default=0.0)
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--vllm-root", type=Path, default=DEFAULT_VLLM_ROOT)
+    parser.add_argument(
+        "--nvidia-userspace-bundle-root",
+        type=Path,
+        required=True,
+    )
+    parser.add_argument(
+        "--expected-nvidia-userspace-bundle-manifest-sha256",
+        required=True,
+    )
+    parser.add_argument(
+        "--expected-nvidia-userspace-bundle-content-digest",
+        required=True,
+    )
+    parser.add_argument("--expected-nvidia-driver-version", required=True)
     parser.add_argument("--cpu-bytes", type=int, default=1 << 30)
     parser.add_argument("--timeout-s", type=float, default=60.0)
     parser.add_argument("--cuda-device", type=int, default=0)
@@ -2292,7 +2552,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "hash all model weights and vLLM native binaries "
-            "(required for every M2 v2 run)"
+            "(required for every M2 v3 run)"
         ),
     )
     return parser
@@ -2307,12 +2567,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--timeout-s must be positive")
     if args.cuda_device < 0:
         raise SystemExit("--cuda-device must be non-negative")
+    try:
+        _reject_loader_injection()
+        nvidia_bundle = _validate_nvidia_bundle(
+            args.nvidia_userspace_bundle_root,
+            expected_manifest_sha256=(
+                args.expected_nvidia_userspace_bundle_manifest_sha256
+            ),
+            expected_content_digest=(
+                args.expected_nvidia_userspace_bundle_content_digest
+            ),
+            expected_driver_version=args.expected_nvidia_driver_version,
+        )
+    except M2ValidationError as exc:
+        print(f"M2 ABBA failed before artifact creation: {exc}", file=sys.stderr)
+        return 1
 
     output_dir = args.output_dir.resolve()
     for protected_root in (
         REPO_ROOT.resolve(),
         args.vllm_root.resolve(),
         args.model.resolve(),
+        args.nvidia_userspace_bundle_root.resolve(),
     ):
         require(
             output_dir != protected_root
@@ -2328,7 +2604,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
     try:
-        _run(args, output_dir, run_started_ns)
+        _run(args, output_dir, run_started_ns, nvidia_bundle)
     except Exception as exc:
         for name in (
             "M2_ITEM8_FORMAL_RUN_MANIFEST.json",

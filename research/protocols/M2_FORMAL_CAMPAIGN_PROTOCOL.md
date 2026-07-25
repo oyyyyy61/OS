@@ -14,7 +14,11 @@ create-only `M2_FROZEN_TOLERANCE.json`. The shared calibration evidence
 validator must replay the complete upstream campaign. The supplied files must
 bind the same implementation manifest, reproducibility fingerprint,
 `atol=0.125`, and `rtol=0`. Their content hashes, paths, and sizes are frozen in
-the formal preregistration.
+the formal preregistration. The parent must use calibration preregistration v3,
+the committed `CALIBRATION_V3_LAUNCH_MARKER.json` direct-child binding, one
+common execution HEAD and DAGKV snapshot across all 59 runs, and the same
+NVIDIA bundle root, manifest SHA-256, content digest, and driver version frozen
+for formal execution.
 
 The formal launcher also freezes the data-plane runner, formal aggregator,
 independent raw replay validator, shared calibration evidence validator,
@@ -60,7 +64,9 @@ engine. The command invokes the frozen runner with:
 
 - `--mode formal`;
 - the frozen `--tolerance-file` and `--calibration-manifest`;
-- the frozen model, vLLM root, CPU allocation, timeout, and CUDA device; and
+- the frozen model, vLLM root, CPU allocation, timeout, and CUDA device;
+- the NVIDIA bundle root, expected manifest SHA-256, content digest, and driver
+  version; and
 - `--full-provenance`.
 
 The launcher records one fsynced `submitted` row before spawn and one fsynced
@@ -124,8 +130,9 @@ After a successful prepublication replay, the validator publishes
 - byte length, record count, and SHA-256 of the complete 42-row journal;
 - the acceptance SHA-256;
 - the calibration and frozen-tolerance SHA-256 values;
-- the implementation manifest and reproducibility fingerprint; and
-- the marker execution binding and common DAGKV snapshot SHA-256; and
+- the implementation manifest and reproducibility fingerprint;
+- the NVIDIA bundle root, manifest SHA-256, content digest, and driver version;
+- the marker execution binding and common DAGKV snapshot SHA-256;
 - the ordered 20 run names, attempt IDs, run IDs, result, provenance,
   checksum, per-run formal-manifest, DAGKV HEAD, and DAGKV snapshot hashes.
 

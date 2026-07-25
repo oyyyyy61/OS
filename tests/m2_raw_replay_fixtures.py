@@ -12,9 +12,17 @@ from typing import Any
 import pytest
 
 from tools.m2_raw_replay import FROZEN_QWEN3_8B_VOCAB_SIZE
+from tools.nvidia_driver_userspace_bundle import (
+    CONTENT_DIGEST_DOMAIN,
+    RUNTIME_DERIVATION,
+)
+from tools.nvidia_driver_userspace_bundle import (
+    MANIFEST_SCHEMA as NVIDIA_MANIFEST_SCHEMA,
+)
 
 RUN_ID = "m2-fixture-raw-replay"
 DIGEST = hashlib.sha256(b"canonical kv").hexdigest()
+NVIDIA_KERNEL_VERSION = "999.888.777"
 BYTES = 4096
 PHASES = ("A1", "G", "B1", "B2", "A2")
 PAIRS = (
@@ -34,6 +42,10 @@ class RawRunFixture:
     run_id: str
     implementation_manifest_sha256: str
     reproducibility_fingerprint: str
+    nvidia_bundle_root: str
+    nvidia_driver_version: str
+    nvidia_manifest_sha256: str
+    nvidia_content_digest: str
 
 
 def _canonical(payload: Any) -> str:
@@ -58,6 +70,143 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             for row in rows
         )
     )
+
+
+def _nvidia_capture(
+    *,
+    bundle_root: Path | None = None,
+    driver_version: str = NVIDIA_KERNEL_VERSION,
+) -> dict[str, Any]:
+    kernel_version = driver_version
+    bundle_root = bundle_root or Path("/fixture/nvidia")
+    if not bundle_root.is_absolute():
+        raise ValueError("fixture NVIDIA bundle root must be absolute")
+    rootfs = bundle_root / "rootfs"
+    library = rootfs / "usr/lib/x86_64-linux-gnu"
+    nvidia_smi = rootfs / "usr/bin/nvidia-smi"
+    libcuda = library / f"libcuda.so.{kernel_version}"
+    libnvidia_ml = library / f"libnvidia-ml.so.{kernel_version}"
+    libcuda_payload = b"fixture libcuda"
+    packages = [
+        {
+            "path": "libnvidia-compute-fixture_amd64.deb",
+            "package": "libnvidia-compute-fixture",
+            "version": f"{kernel_version}-fixture",
+            "architecture": "amd64",
+            "mode": 0o444,
+            "size": 1,
+            "sha256": hashlib.sha256(b"compute deb").hexdigest(),
+        },
+        {
+            "path": "nvidia-utils-fixture_amd64.deb",
+            "package": "nvidia-utils-fixture",
+            "version": f"{kernel_version}-fixture",
+            "architecture": "amd64",
+            "mode": 0o444,
+            "size": 1,
+            "sha256": hashlib.sha256(b"utils deb").hexdigest(),
+        },
+    ]
+    runtime_tree = [
+        {"path": ".", "type": "directory", "mode": 0o555},
+        {"path": "usr", "type": "directory", "mode": 0o555},
+        {"path": "usr/bin", "type": "directory", "mode": 0o555},
+        {
+            "path": "usr/bin/nvidia-smi",
+            "type": "file",
+            "mode": 0o555,
+            "size": 1,
+            "sha256": hashlib.sha256(b"nvidia-smi").hexdigest(),
+        },
+        {"path": "usr/lib", "type": "directory", "mode": 0o555},
+        {
+            "path": "usr/lib/x86_64-linux-gnu",
+            "type": "directory",
+            "mode": 0o555,
+        },
+        {
+            "path": "usr/lib/x86_64-linux-gnu/libcuda.so",
+            "type": "symlink",
+            "target": "libcuda.so.1",
+        },
+        {
+            "path": "usr/lib/x86_64-linux-gnu/libcuda.so.1",
+            "type": "symlink",
+            "target": libcuda.name,
+        },
+        {
+            "path": libcuda.relative_to(rootfs).as_posix(),
+            "type": "file",
+            "mode": 0o444,
+            "size": len(libcuda_payload),
+            "sha256": hashlib.sha256(libcuda_payload).hexdigest(),
+        },
+        {
+            "path": "usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
+            "type": "symlink",
+            "target": libnvidia_ml.name,
+        },
+        {
+            "path": libnvidia_ml.relative_to(rootfs).as_posix(),
+            "type": "file",
+            "mode": 0o444,
+            "size": 1,
+            "sha256": hashlib.sha256(b"fixture nvml").hexdigest(),
+        },
+    ]
+    content_digest = _canonical(
+        {
+            "domain": CONTENT_DIGEST_DOMAIN,
+            "kernel_module_version": kernel_version,
+            "packages": packages,
+            "runtime_derivation": RUNTIME_DERIVATION,
+            "runtime_tree": runtime_tree,
+        }
+    )
+    manifest = {
+        "schema_version": NVIDIA_MANIFEST_SCHEMA,
+        "created_at_utc": "2026-07-24T00:00:00+00:00",
+        "bundle_type": "nvidia_debian_userspace_exact",
+        "kernel_module_version": kernel_version,
+        "package_count": len(packages),
+        "packages": packages,
+        "runtime_derivation": RUNTIME_DERIVATION,
+        "runtime_entry_count": len(runtime_tree),
+        "runtime_tree": runtime_tree,
+        "content_digest_algorithm": "sha256",
+        "content_digest": content_digest,
+    }
+    manifest_bytes = (
+        json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n"
+    ).encode()
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    return {
+        "root": str(bundle_root),
+        "expected_manifest_sha256": manifest_sha256,
+        "expected_content_digest": content_digest,
+        "expected_driver_version": kernel_version,
+        "manifest": manifest,
+        "manifest_sha256": manifest_sha256,
+        "content_digest": content_digest,
+        "kernel_module_version": kernel_version,
+        "runtime": {
+            "rootfs": str(rootfs),
+            "library_directory": str(library),
+            "nvidia_smi": str(nvidia_smi),
+            "libcuda": str(libcuda),
+            "libnvidia_ml": str(libnvidia_ml),
+        },
+        "libcuda_mapping": {
+            "path": str(libcuda),
+            "resolved_path": str(libcuda),
+            "rootfs_relative_path": libcuda.relative_to(rootfs).as_posix(),
+            "device": 1,
+            "inode": 12,
+            "size": len(libcuda_payload),
+            "sha256": hashlib.sha256(libcuda_payload).hexdigest(),
+            "mapping_count": 5,
+        },
+    }
 
 
 def _reseal(run_dir: Path) -> None:
@@ -281,6 +430,8 @@ def build_raw_run(
     cpu_bytes: int = 1024,
     protocol_payload: bytes | None = None,
     python_executable: Path | None = None,
+    nvidia_bundle_root: Path | None = None,
+    nvidia_driver_version: str = NVIDIA_KERNEL_VERSION,
 ) -> RawRunFixture:
     np = pytest.importorskip("numpy")
     run_dir.mkdir()
@@ -374,7 +525,7 @@ def build_raw_run(
         },
     }
     execution = {
-        "schema_version": "dagkv.m2.vllm_abba.v2",
+        "schema_version": "dagkv.m2.vllm_abba.v3",
         "run_id": run_id,
         "measurements": {
             phase: {
@@ -456,6 +607,9 @@ def build_raw_run(
                     "research/protocols/M2_VLLM_REPLAY_PROTOCOL.md", protocol
                 ),
                 _manifest_entry("tools/m2_raw_replay.py", b"raw replay"),
+                _manifest_entry(
+                    "tools/nvidia_driver_userspace_bundle.py", b"nvidia bundle"
+                ),
                 _manifest_entry("tools/run_m2_vllm_abba.py", b"runner"),
             ],
             key=lambda item: item["path"],
@@ -550,13 +704,29 @@ def build_raw_run(
         "spec_module_path": "dagkv_vllm_m2.spec",
         "spec_name": "DAGKVDiagnosticCPUOffloadingSpec",
     }
-    system = {"frozen_environment": fingerprint_seed, "gpu": {"name": "fixture"}}
+    nvidia = _nvidia_capture(
+        bundle_root=nvidia_bundle_root,
+        driver_version=nvidia_driver_version,
+    )
+    system = {
+        "frozen_environment": fingerprint_seed,
+        "gpu": {
+            "name": "fixture",
+            "nvidia_smi": (
+                f"GPU-fixture, {nvidia['kernel_module_version']}, "
+                "00000000:01:00.0, Fixture GPU, 24564"
+            ),
+            "nvidia_smi_executable": nvidia["runtime"]["nvidia_smi"],
+        },
+        "environment": {"LD_LIBRARY_PATH": nvidia["runtime"]["library_directory"]},
+    }
     components = {
         "implementation_manifest_sha256": implementation["manifest_sha256"],
         "vllm_snapshot_sha256": vllm_git["snapshot_sha256"],
         "model_manifest_sha256": model["manifest_sha256"],
         "runtime_binary_manifest_sha256": runtime["manifest_sha256"],
         "dependency_manifest_sha256": dependencies["manifest_sha256"],
+        "nvidia_driver_userspace_content_digest": nvidia["content_digest"],
         "system": system,
         "prompt_token_ids": list(range(1000, 1017)),
         "block_size": 16,
@@ -570,11 +740,22 @@ def build_raw_run(
     }
     fingerprint = _canonical(components)
     provenance = {
-        "schema_version": "dagkv.m2.vllm_abba.v2",
+        "schema_version": "dagkv.m2.vllm_abba.v3",
         "run_id": run_id,
         "mode": "calibration",
         "started_at_utc": "2026-07-25T00:00:00+00:00",
-        "argv": ["tools/run_m2_vllm_abba.py", "--full-provenance"],
+        "argv": [
+            "tools/run_m2_vllm_abba.py",
+            "--full-provenance",
+            "--nvidia-userspace-bundle-root",
+            nvidia["root"],
+            "--expected-nvidia-userspace-bundle-manifest-sha256",
+            nvidia["manifest_sha256"],
+            "--expected-nvidia-userspace-bundle-content-digest",
+            nvidia["content_digest"],
+            "--expected-nvidia-driver-version",
+            nvidia["kernel_module_version"],
+        ],
         "python": "3.12",
         "executable": str(executable_path),
         "prompt_token_ids": list(range(1000, 1017)),
@@ -602,6 +783,7 @@ def build_raw_run(
         "model": model,
         "runtime_binaries": runtime,
         "dependencies": dependencies,
+        "nvidia_driver_userspace": nvidia,
         "system": system,
         "reproducibility_components": components,
         "reproducibility_fingerprint": fingerprint,
@@ -614,11 +796,15 @@ def build_raw_run(
             "implementation_manifest_sha256": implementation["manifest_sha256"],
             "model_file_stats_unchanged": True,
             "runtime_binary_stats_unchanged": True,
+            "nvidia_driver_userspace_content_digest": nvidia["content_digest"],
+            "nvidia_driver_userspace_manifest_sha256": nvidia["manifest_sha256"],
+            "nvidia_driver_userspace_unchanged": True,
+            "libcuda_mapping_unchanged": True,
         },
     }
     _write_json(run_dir / "provenance.json", provenance)
     result = {
-        "schema_version": "dagkv.m2.vllm_abba.v2",
+        "schema_version": "dagkv.m2.vllm_abba.v3",
         "run_id": run_id,
         "mode": "calibration",
         "gate_status": "CALIBRATED_NOT_ACCEPTED",
@@ -650,4 +836,8 @@ def build_raw_run(
         run_id=run_id,
         implementation_manifest_sha256=implementation["manifest_sha256"],
         reproducibility_fingerprint=fingerprint,
+        nvidia_bundle_root=nvidia["root"],
+        nvidia_driver_version=nvidia["kernel_module_version"],
+        nvidia_manifest_sha256=nvidia["manifest_sha256"],
+        nvidia_content_digest=nvidia["content_digest"],
     )
