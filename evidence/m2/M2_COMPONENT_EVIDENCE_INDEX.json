@@ -1,0 +1,61 @@
+{
+  "schema_version": "dagkv.m2.component_evidence_index.v1",
+  "recorded_at_utc": "2026-07-25T12:26:21Z",
+  "status": "ITEMS_1_TO_7_COMPONENT_EVIDENCE_VERIFIED",
+  "runtime_root": "/home/data/25_oyzx/dagkv_runtime",
+  "eligible_gate_scope": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "successful_bundle": {
+    "name": "m2_component_evidence_v1_20260725_run02",
+    "runtime_path": "/home/data/25_oyzx/dagkv_runtime/m2_component_evidence_v1_20260725_run02",
+    "schema_version": "dagkv.m2.component_evidence.v1",
+    "manifest_sha256": "7502f5e09edb6f08f4ac16b216459d3db7aca5856addb18cd2c50280149dc8c1",
+    "sha256sums_sha256": "e012c739643ea1351365111c8e2c157af310f16e6c55e85640918b873e26ac63",
+    "protected_file_count": 20,
+    "dagkv_head": "67e69ffb3159c66805018fe78b13a7b29f011adf",
+    "dagkv_snapshot_sha256": "c9d668f2341cab594eb31712bcc43604b4006ac6ae0557aed81ce0cc5a07eef6",
+    "vllm_head": "2e5d72fa44e29cdae21023d6cd4de03bdba9bfbd",
+    "vllm_worktree_dirty_and_fully_captured": true,
+    "vllm_snapshot_sha256": "f9515d24f33c03580e48d4b660339f9573504bd532b998895ce673461166f07e",
+    "suites": [
+      {
+        "suite_id": "dagkv_core",
+        "tests": 269
+      },
+      {
+        "suite_id": "dagkv_vllm_adapter",
+        "tests": 13
+      },
+      {
+        "suite_id": "vllm_lifecycle_cpu",
+        "tests": 345
+      }
+    ],
+    "total_tests": 627,
+    "all_passed": true,
+    "external_replay_passed": true,
+    "raw_only_replay_passed": true,
+    "files_mode": "0444",
+    "directories_mode": "0555"
+  },
+  "ineligible_attempts": [
+    {
+      "name": "m2_component_evidence_v1_20260725_run01",
+      "status": "FAILED_NO_ACCEPTANCE",
+      "failure": "the vLLM distribution inventory rejected the simultaneous source-tree egg-info and editable-install dist-info records",
+      "resolution": "commit 67e69ffb3159c66805018fe78b13a7b29f011adf preserves and deterministically sorts both redacted source records",
+      "superseded_by": "m2_component_evidence_v1_20260725_run02"
+    }
+  ],
+  "gpu_used": false,
+  "item8_accepted": false,
+  "m2_accepted": false,
+  "claim_scope": "M2 items 1-7 deterministic CPU component contract only; no item-8, performance, scheduling-policy, C1, C2, C3, or aggregate-M2 claim"
+}

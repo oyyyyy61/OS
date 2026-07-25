@@ -2,10 +2,11 @@
 
 Status: living pre-acceptance index for the v3 evidence protocol, 2026-07-25.
 
-The three CPU suites currently pass, and their create-only evidence runner and
-independent replay are implemented. Items 1-7 remain pre-acceptance until a
-clean committed HEAD produces the read-only bundle defined by
-`research/protocols/M2_COMPONENT_EVIDENCE_PROTOCOL.md`.
+The three CPU suites passed as one create-only, read-only bundle bound to clean
+DAGKV commit `67e69ffb3159c66805018fe78b13a7b29f011adf`. External and raw-only
+independent replay both passed. The manifest and checksum identities are indexed
+in `evidence/m2/M2_COMPONENT_EVIDENCE_INDEX.json`; this directly supports M2
+items 1-7 and leaves item 8 and aggregate M2 open.
 
 | Gate | Direct component or pilot evidence | Remaining gate-closing evidence |
 | --- | --- | --- |
