@@ -1,6 +1,6 @@
 # DAGKV Clean-Room Architecture
 
-Status: normative for the new implementation, 2026-07-24.
+Status: normative for the new implementation, amended 2026-07-27.
 
 ## Boundary
 
@@ -79,19 +79,31 @@ and bindings before their node terminals at the same timestamp.
 
 ## Ledger Families
 
-`dagkv_lifecycle_event_v1` preserves M1 physical `allocate/evict`, content
-`map/unmap`, logical `bind/release`, lease, and transfer families. It adds two
-families needed by the canonical M2 runtime:
+`dagkv_lifecycle_event_v2` preserves M1 physical `allocate/evict`, content
+`map/unmap`, logical `bind/release`, lease, and transfer families. It retains
+the two families needed by the canonical M2 runtime:
 
 - `exec_map/exec_unmap` records request-local engine mappings without changing
   content-map conservation;
 - `node/{scheduled,completed,failed,cancelled}` records actual DAG dependency
   execution.
 
+For C1 trace reconstruction, v2 also records an atomic batch ID/index/size,
+typed `bind_state`, exact `waiter_join/waiter_leave` after-sets, and complete
+`block_state` boundary snapshots. A sole-writer `stream_seal` row closes the
+stream with its own monotonic timestamp; no caller-provided closure time is
+trusted. Detached replay checks complete batches, exact binding/waiter lineage,
+block state, and every terminal transfer record before the component gate can
+issue a lifecycle receipt. Formal label authorization additionally requires the
+still-open bundle manifest and final evidence seal. The live auditor reconciles
+those projections against the runtime, and any exception while applying an
+already committed transition poisons the writer and prevents later mutation or
+sealing. The accepted M2 result remains bound to its frozen v1 artifacts; the
+pre-data v2 extension does not rewrite or broaden that historical acceptance.
+
 Logical owner bindings in DAGKV attach to immutable content, so they can remain
 valid while that content moves between tiers. This is an explicit schema delta
-from the physical-allocation binding used by the frozen M1 adapter. The M2 GPU
-evidence freeze must version and validate this exporter before acceptance.
+from the physical-allocation binding used by the frozen M1 adapter.
 
 ## Runtime Flow
 

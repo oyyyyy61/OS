@@ -111,6 +111,7 @@ class LedgerAction(StrEnum):
     ALLOCATE = "allocate"
     MAP = "map"
     BIND = "bind"
+    BIND_STATE = "bind_state"
     RELEASE = "release"
     LEASE = "lease"
     SAVE = "save"
@@ -120,6 +121,10 @@ class LedgerAction(StrEnum):
     EVICT = "evict"
     EXEC_MAP = "exec_map"
     EXEC_UNMAP = "exec_unmap"
+    WAITER_JOIN = "waiter_join"
+    WAITER_LEAVE = "waiter_leave"
+    BLOCK_STATE = "block_state"
+    STREAM_SEAL = "stream_seal"
     NODE = "node"
 
 
@@ -692,12 +697,73 @@ class BlockRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class BlockStateSnapshot:
+    """Exact block state at one atomic lifecycle batch boundary."""
+
+    location_version: int
+    residency: ResidencyState
+    replicas: tuple[ReplicaId, ...]
+    inflight_transfer_id: str | None
+    inflight_direction: TransferDirection | None
+    reclaimed: bool
+
+    def __post_init__(self) -> None:
+        if type(self.location_version) is not int or self.location_version < 0:
+            raise IdentityError("block location_version must be non-negative")
+        if not isinstance(self.replicas, tuple):
+            raise IdentityError("block replicas must be a tuple")
+        if self.replicas != tuple(sorted(self.replicas)) or len(self.replicas) != len(
+            set(self.replicas)
+        ):
+            raise IdentityError("block replicas must be sorted and unique")
+        if len({replica.tier for replica in self.replicas}) != len(self.replicas):
+            raise IdentityError("block snapshot has duplicate replica tiers")
+        if self.reclaimed != (self.residency == ResidencyState.FREED):
+            raise IdentityError("block reclaimed flag disagrees with residency")
+        inflight = self.inflight_transfer_id is not None
+        if inflight != (self.inflight_direction is not None):
+            raise IdentityError("block inflight identity and direction must co-occur")
+        if inflight:
+            require_text("inflight_transfer_id", self.inflight_transfer_id or "")
+        expected_copy = {
+            TransferDirection.D2H: ResidencyState.D2H_COPYING,
+            TransferDirection.H2D: ResidencyState.H2D_COPYING,
+        }.get(self.inflight_direction)
+        if expected_copy is not None and self.residency != expected_copy:
+            raise IdentityError("block transfer direction disagrees with residency")
+        if expected_copy is None and self.residency in {
+            ResidencyState.D2H_COPYING,
+            ResidencyState.H2D_COPYING,
+        }:
+            raise IdentityError("copying residency lacks an inflight transfer")
+        tiers = {replica.tier for replica in self.replicas}
+        if self.reclaimed and self.replicas:
+            raise IdentityError("reclaimed block retains published replicas")
+        if self.inflight_direction == TransferDirection.D2H and Tier.GPU not in tiers:
+            raise IdentityError("D2H block snapshot lacks its GPU source")
+        if self.inflight_direction == TransferDirection.H2D and Tier.CPU not in tiers:
+            raise IdentityError("H2D block snapshot lacks its CPU source")
+        if not inflight and not self.reclaimed:
+            expected_residency = {
+                frozenset(): ResidencyState.ABSENT,
+                frozenset({Tier.GPU}): ResidencyState.GPU_ONLY,
+                frozenset({Tier.CPU}): ResidencyState.CPU_ONLY,
+                frozenset({Tier.GPU, Tier.CPU}): ResidencyState.GPU_AND_CPU,
+            }[frozenset(tiers)]
+            if self.residency != expected_residency:
+                raise IdentityError("block replicas disagree with residency")
+
+
+@dataclass(frozen=True, slots=True)
 class LifecycleEvent:
     """Immutable row in the DAGKV lifecycle ledger."""
 
     schema_version: str
     sequence: int
     event_id: str
+    batch_id: str
+    batch_index: int
+    batch_size: int
     parent_event_id: str | None
     run_id: str
     phase: str
@@ -716,6 +782,8 @@ class LifecycleEvent:
     blocks: tuple[ReplicaId, ...] = ()
     binding_id: str | None = None
     binding_kind: BindingKind | None = None
+    binding_state_before: BindingState | None = None
+    binding_state_after: BindingState | None = None
     lease_id: str | None = None
     lease_deadline_ns: int | None = None
     transfer_id: str | None = None
@@ -727,6 +795,8 @@ class LifecycleEvent:
     payload_digest: str | None = None
     observed_digest: str | None = None
     error: str | None = None
+    waiter_binding_ids_after: tuple[str, ...] | None = None
+    block_state_after: BlockStateSnapshot | None = None
 
     @property
     def block_count(self) -> int:

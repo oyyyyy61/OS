@@ -3,24 +3,30 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import RLock
 
 from dagkv.domain import (
     BindingKind,
+    BindingState,
     BlockKey,
+    BlockStateSnapshot,
     DAGKVError,
     ExecutionRef,
     LedgerAction,
     LedgerStatus,
     LifecycleEvent,
     ReplicaId,
+    ResidencyState,
     StateTransitionError,
     Tier,
+    TransferDirection,
     WorkflowKey,
     require_optional_sha256,
     require_text,
 )
+
+LIFECYCLE_EVENT_SCHEMA_VERSION = "dagkv_lifecycle_event_v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +50,8 @@ class EventDraft:
     blocks: tuple[ReplicaId, ...] = ()
     binding_id: str | None = None
     binding_kind: BindingKind | None = None
+    binding_state_before: BindingState | None = None
+    binding_state_after: BindingState | None = None
     lease_id: str | None = None
     lease_deadline_ns: int | None = None
     transfer_id: str | None = None
@@ -55,6 +63,29 @@ class EventDraft:
     payload_digest: str | None = None
     observed_digest: str | None = None
     error: str | None = None
+    waiter_binding_ids_after: tuple[str, ...] | None = None
+    block_state_after: BlockStateSnapshot | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TransferLedgerSnapshot:
+    """Exact scheduled or terminal transfer state reconstructed from events."""
+
+    transfer_id: str
+    action: LedgerAction
+    block_key: BlockKey
+    source_replica: ReplicaId
+    target_replica: ReplicaId
+    status: LedgerStatus
+    started_ns: int
+    terminal_ns: int | None
+    declared_bytes: int
+    observed_bytes: int | None
+    payload_digest: str
+    observed_digest: str | None
+    error: str | None
+    scheduled_event_id: str
+    waiter_binding_ids: tuple[str, ...]
 
 
 @dataclass(slots=True)
@@ -75,6 +106,10 @@ class _ReferenceState:
     mapped_allocations: set[ReplicaId] = field(default_factory=set)
     binding_blocks: dict[str, BlockKey] = field(default_factory=dict)
     binding_nodes: dict[str, tuple[WorkflowKey, str]] = field(default_factory=dict)
+    binding_lineages: dict[
+        str,
+        tuple[WorkflowKey, str, str, BindingKind, ExecutionRef | None],
+    ] = field(default_factory=dict)
     content_locations: dict[tuple[BlockKey, ReplicaId], str] = field(
         default_factory=dict
     )
@@ -88,6 +123,13 @@ class _ReferenceState:
     transfer_targets: dict[ReplicaId, LedgerStatus] = field(default_factory=dict)
     transfer_target_actions: dict[ReplicaId, LedgerAction] = field(default_factory=dict)
     h2d_required_allocations: set[ReplicaId] = field(default_factory=set)
+    binding_states: dict[str, BindingState] = field(default_factory=dict)
+    transfer_waiters: dict[str, set[str]] = field(default_factory=dict)
+    transfer_waiter_history: set[str] = field(default_factory=set)
+    transfer_actions: dict[str, LedgerAction] = field(default_factory=dict)
+    transfer_records: dict[str, TransferLedgerSnapshot] = field(default_factory=dict)
+    block_states: dict[BlockKey, BlockStateSnapshot] = field(default_factory=dict)
+    stream_sealed: bool = False
 
     def clone(self) -> _ReferenceState:
         return _ReferenceState(
@@ -103,6 +145,7 @@ class _ReferenceState:
             mapped_allocations=set(self.mapped_allocations),
             binding_blocks=dict(self.binding_blocks),
             binding_nodes=dict(self.binding_nodes),
+            binding_lineages=dict(self.binding_lineages),
             content_locations=dict(self.content_locations),
             execution_locations=dict(self.execution_locations),
             execution_refs=dict(self.execution_refs),
@@ -111,13 +154,23 @@ class _ReferenceState:
             transfer_targets=dict(self.transfer_targets),
             transfer_target_actions=dict(self.transfer_target_actions),
             h2d_required_allocations=set(self.h2d_required_allocations),
+            binding_states=dict(self.binding_states),
+            transfer_waiters={
+                transfer_id: set(waiters)
+                for transfer_id, waiters in self.transfer_waiters.items()
+            },
+            transfer_waiter_history=set(self.transfer_waiter_history),
+            transfer_actions=dict(self.transfer_actions),
+            transfer_records=dict(self.transfer_records),
+            block_states=dict(self.block_states),
+            stream_sealed=self.stream_sealed,
         )
 
 
 class EventLedger:
     """Create ordered immutable events with atomic multi-row commits."""
 
-    SCHEMA_VERSION = "dagkv_lifecycle_event_v1"
+    SCHEMA_VERSION = LIFECYCLE_EVENT_SCHEMA_VERSION
 
     def __init__(
         self,
@@ -126,6 +179,7 @@ class EventLedger:
         phase: str,
         source: str,
         mutation_guard: Callable[[], None] | None = None,
+        require_complete_state: bool = False,
     ) -> None:
         require_text("run_id", run_id)
         require_text("phase", phase)
@@ -134,6 +188,7 @@ class EventLedger:
         self.phase = phase
         self.source = source
         self._mutation_guard = mutation_guard
+        self._require_complete_state = require_complete_state
         self._events: list[LifecycleEvent] = []
         self._events_by_id: dict[str, LifecycleEvent] = {}
         self._seen_identities = self._empty_identity_registry()
@@ -147,6 +202,39 @@ class EventLedger:
 
         with self._lock:
             return tuple(self._events)
+
+    def block_states(self) -> dict[BlockKey, BlockStateSnapshot]:
+        """Return detached block boundary states for runtime reconciliation."""
+
+        with self._lock:
+            return dict(self._references.block_states)
+
+    def binding_states(self) -> dict[str, BindingState]:
+        """Return detached active binding states for runtime reconciliation."""
+
+        with self._lock:
+            return dict(self._references.binding_states)
+
+    def active_transfer_waiters(self) -> dict[str, frozenset[str]]:
+        """Return exact waiter sets for transfers that remain active."""
+
+        with self._lock:
+            return {
+                transfer_id: frozenset(self._references.transfer_waiters[transfer_id])
+                for transfer_id in self._references.transfers
+            }
+
+    def transfer_records(self) -> dict[str, TransferLedgerSnapshot]:
+        """Return every scheduled transfer with its exact latest terminal state."""
+
+        with self._lock:
+            return dict(self._references.transfer_records)
+
+    def transfer_waiter_history(self) -> frozenset[str]:
+        """Return every binding that has joined any H2D transfer."""
+
+        with self._lock:
+            return frozenset(self._references.transfer_waiter_history)
 
     @property
     def last_timestamp_ns(self) -> int:
@@ -173,6 +261,8 @@ class EventLedger:
         if not batch:
             return ()
         with self._lock:
+            batch_id = f"bat-{len(self._events):012d}"
+            batch_size = len(batch)
             local_ids = [draft.local_id for draft in batch if draft.local_id]
             if len(local_ids) != len(set(local_ids)):
                 raise StateTransitionError("duplicate local event ID in batch")
@@ -198,6 +288,9 @@ class EventLedger:
                     schema_version=self.SCHEMA_VERSION,
                     sequence=sequence,
                     event_id=f"evt-{sequence:012d}",
+                    batch_id=batch_id,
+                    batch_index=offset,
+                    batch_size=batch_size,
                     parent_event_id=parent_id,
                     run_id=self.run_id,
                     phase=self.phase,
@@ -216,6 +309,8 @@ class EventLedger:
                     blocks=draft.blocks,
                     binding_id=draft.binding_id,
                     binding_kind=draft.binding_kind,
+                    binding_state_before=draft.binding_state_before,
+                    binding_state_after=draft.binding_state_after,
                     lease_id=draft.lease_id,
                     lease_deadline_ns=draft.lease_deadline_ns,
                     transfer_id=draft.transfer_id,
@@ -227,6 +322,8 @@ class EventLedger:
                     payload_digest=draft.payload_digest,
                     observed_digest=draft.observed_digest,
                     error=draft.error,
+                    waiter_binding_ids_after=draft.waiter_binding_ids_after,
+                    block_state_after=draft.block_state_after,
                 )
                 parent = available.get(parent_id) if parent_id else None
                 self._validate_event(event, parent, last_timestamp)
@@ -245,6 +342,13 @@ class EventLedger:
                 if draft.local_id:
                     local_events[draft.local_id] = event
                 last_timestamp = event.timestamp_ns
+
+            if self._require_complete_state:
+                self._validate_complete_batch(
+                    tuple(pending),
+                    live=live_identities,
+                    references=references,
+                )
 
             self._events.extend(pending)
             self._events_by_id.update((event.event_id, event) for event in pending)
@@ -346,6 +450,14 @@ class EventLedger:
         replica = event.blocks[0] if event.blocks else None
         block_key = event.block_key
 
+        if references.stream_sealed:
+            raise StateTransitionError("lifecycle event appears after the stream seal")
+        if event.action == LedgerAction.STREAM_SEAL:
+            if references.transfers:
+                raise StateTransitionError("stream seal has an active transfer")
+            references.stream_sealed = True
+            return
+
         if event.action == LedgerAction.NODE:
             if event.workflow is None or event.node_id is None:
                 raise StateTransitionError("node reference identity is incomplete")
@@ -413,7 +525,12 @@ class EventLedger:
                 for mapped_block, _ in references.content_locations
             ):
                 raise StateTransitionError("binding has no live content location")
-            if event.workflow is None or event.node_id is None:
+            if (
+                event.workflow is None
+                or event.request_id is None
+                or event.node_id is None
+                or event.binding_kind is None
+            ):
                 raise StateTransitionError("binding node identity is incomplete")
             if (
                 event.binding_kind == BindingKind.REQUEST
@@ -428,6 +545,104 @@ class EventLedger:
             references.binding_nodes[event.binding_id] = (
                 event.workflow,
                 event.node_id,
+            )
+            references.binding_lineages[event.binding_id] = (
+                event.workflow,
+                event.request_id,
+                event.node_id,
+                event.binding_kind,
+                event.execution_ref,
+            )
+            if event.binding_state_after is None:
+                raise StateTransitionError("binding initial state is missing")
+            references.binding_states[event.binding_id] = event.binding_state_after
+            return
+
+        if event.action == LedgerAction.BIND_STATE:
+            if block_key is None or event.binding_id is None:
+                raise StateTransitionError("binding state identity is incomplete")
+            if event.binding_id not in live["binding"]:
+                raise StateTransitionError("binding state owner is not live")
+            if references.binding_blocks.get(event.binding_id) != block_key:
+                raise StateTransitionError("binding state changed block")
+            current = references.binding_states.get(event.binding_id)
+            if current != event.binding_state_before:
+                raise StateTransitionError("binding state before-value is stale")
+            if event.binding_state_after is None:
+                raise StateTransitionError("binding state after-value is missing")
+            allowed = {
+                BindingState.REQUIRED: {BindingState.RETAINED},
+                BindingState.RETAINED: {
+                    BindingState.REQUIRED,
+                    BindingState.WAITING,
+                },
+                BindingState.WAITING: {
+                    BindingState.REQUIRED,
+                    BindingState.RETAINED,
+                },
+            }
+            if event.binding_state_after not in allowed.get(current, set()):
+                raise StateTransitionError("binding state transition is not allowed")
+            references.binding_states[event.binding_id] = event.binding_state_after
+            return
+
+        if event.action in {LedgerAction.WAITER_JOIN, LedgerAction.WAITER_LEAVE}:
+            if (
+                block_key is None
+                or event.binding_id is None
+                or event.transfer_id is None
+                or event.waiter_binding_ids_after is None
+            ):
+                raise StateTransitionError("transfer waiter identity is incomplete")
+            transfer = references.transfers.get(event.transfer_id)
+            if transfer is None or transfer[0] != block_key:
+                raise StateTransitionError("waiter transfer is not live for this block")
+            if references.transfer_actions.get(event.transfer_id) not in {
+                LedgerAction.LOAD,
+                LedgerAction.PREFETCH,
+            }:
+                raise StateTransitionError("only H2D transfers accept waiters")
+            if event.binding_id not in live["binding"]:
+                raise StateTransitionError("transfer waiter binding is not live")
+            if references.binding_blocks.get(event.binding_id) != block_key:
+                raise StateTransitionError("transfer waiter belongs to another block")
+            lineage = (
+                event.workflow,
+                event.request_id,
+                event.node_id,
+                event.binding_kind,
+                event.execution_ref,
+            )
+            if references.binding_lineages.get(event.binding_id) != lineage:
+                raise StateTransitionError("transfer waiter binding lineage changed")
+            current = references.transfer_waiters[event.transfer_id]
+            expected = set(current)
+            if event.action == LedgerAction.WAITER_JOIN:
+                if event.binding_id in expected:
+                    raise StateTransitionError("transfer waiter is already joined")
+                if (
+                    references.binding_states.get(event.binding_id)
+                    != BindingState.WAITING
+                ):
+                    raise StateTransitionError("joined transfer waiter is not waiting")
+                expected.add(event.binding_id)
+                references.transfer_waiter_history.add(event.binding_id)
+            else:
+                if event.binding_id not in expected:
+                    raise StateTransitionError("transfer waiter is not joined")
+                if (
+                    references.binding_states.get(event.binding_id)
+                    != BindingState.WAITING
+                ):
+                    raise StateTransitionError("leaving transfer waiter is not waiting")
+                expected.remove(event.binding_id)
+            if tuple(sorted(expected)) != event.waiter_binding_ids_after:
+                raise StateTransitionError("transfer waiter after-set is inconsistent")
+            references.transfer_waiters[event.transfer_id] = expected
+            record = references.transfer_records[event.transfer_id]
+            references.transfer_records[event.transfer_id] = replace(
+                record,
+                waiter_binding_ids=tuple(sorted(expected)),
             )
             return
 
@@ -587,25 +802,75 @@ class EventLedger:
                     for transfer_block, _, _ in references.transfers.values()
                 ):
                     raise StateTransitionError("block already has a live transfer")
-                source_is_live = any(
-                    mapped_block == block_key
+                source_replicas = [
+                    mapped_replica
+                    for mapped_block, mapped_replica in references.content_locations
+                    if mapped_block == block_key
                     and mapped_replica.tier == event.source_tier
-                    for mapped_block, mapped_replica in (references.content_locations)
-                )
-                if not source_is_live:
+                ]
+                if len(source_replicas) != 1:
                     raise StateTransitionError("transfer source content is not live")
                 references.transfers[event.transfer_id] = transfer_ref
                 references.transfer_targets[replica] = LedgerStatus.SCHEDULED
                 references.transfer_target_actions[replica] = event.action
+                references.transfer_waiters[event.transfer_id] = set(
+                    event.waiter_binding_ids_after or ()
+                )
+                references.transfer_actions[event.transfer_id] = event.action
+                references.transfer_records[event.transfer_id] = TransferLedgerSnapshot(
+                    transfer_id=event.transfer_id,
+                    action=event.action,
+                    block_key=block_key,
+                    source_replica=source_replicas[0],
+                    target_replica=replica,
+                    status=event.status,
+                    started_ns=event.timestamp_ns,
+                    terminal_ns=None,
+                    declared_bytes=event.byte_count,
+                    observed_bytes=None,
+                    payload_digest=event.payload_digest,
+                    observed_digest=None,
+                    error=None,
+                    scheduled_event_id=event.event_id,
+                    waiter_binding_ids=event.waiter_binding_ids_after or (),
+                )
                 return
             if references.transfers.get(event.transfer_id) != transfer_ref:
                 raise StateTransitionError("transfer terminal has no live reference")
             if references.transfer_target_actions.get(replica) != event.action:
                 raise StateTransitionError("transfer target action changed")
+            if tuple(sorted(references.transfer_waiters[event.transfer_id])) != (
+                event.waiter_binding_ids_after
+            ):
+                raise StateTransitionError("transfer terminal waiter set changed")
+            for binding_id in references.transfer_waiters[event.transfer_id]:
+                if binding_id not in live["binding"]:
+                    raise StateTransitionError(
+                        "transfer terminal waiter binding is not live"
+                    )
+                if references.binding_states.get(binding_id) != BindingState.WAITING:
+                    raise StateTransitionError(
+                        "transfer terminal waiter binding is not waiting"
+                    )
+                if references.binding_blocks.get(binding_id) != block_key:
+                    raise StateTransitionError(
+                        "transfer terminal waiter binding changed block"
+                    )
             if replica not in live["allocation"]:
                 raise StateTransitionError("transfer target allocation was released")
             references.transfers.pop(event.transfer_id)
+            references.transfer_waiters.pop(event.transfer_id)
             references.transfer_targets[replica] = event.status
+            record = references.transfer_records[event.transfer_id]
+            references.transfer_records[event.transfer_id] = replace(
+                record,
+                status=event.status,
+                terminal_ns=event.timestamp_ns,
+                observed_bytes=event.observed_byte_count,
+                observed_digest=event.observed_digest,
+                error=event.error,
+                waiter_binding_ids=event.waiter_binding_ids_after or (),
+            )
             return
 
         if event.action == LedgerAction.EXEC_MAP:
@@ -685,6 +950,13 @@ class EventLedger:
             if event.binding_id in references.lease_bindings.values():
                 raise StateTransitionError("binding release still has a live lease")
             if any(
+                event.binding_id in references.transfer_waiters[transfer_id]
+                for transfer_id in references.transfers
+            ):
+                raise StateTransitionError(
+                    "binding release still belongs to an active transfer"
+                )
+            if any(
                 binding_id == event.binding_id
                 for _, _, _, binding_id in references.execution_locations.values()
             ):
@@ -693,8 +965,116 @@ class EventLedger:
                 )
             if references.binding_blocks.get(event.binding_id) != block_key:
                 raise StateTransitionError("binding release changed block")
+            if references.binding_states.get(event.binding_id) != (
+                event.binding_state_before
+            ):
+                raise StateTransitionError("binding release before-state is stale")
             references.binding_blocks.pop(event.binding_id)
             references.binding_nodes.pop(event.binding_id)
+            references.binding_lineages.pop(event.binding_id)
+            references.binding_states.pop(event.binding_id)
+            return
+
+        if event.action == LedgerAction.BLOCK_STATE:
+            if block_key is None or event.block_state_after is None:
+                raise StateTransitionError("block state identity is incomplete")
+            EventLedger._apply_block_state_transition(event, references=references)
+
+    @staticmethod
+    def _apply_block_state_transition(
+        event: LifecycleEvent,
+        *,
+        references: _ReferenceState,
+    ) -> None:
+        block_key = event.block_key
+        state = event.block_state_after
+        if block_key is None or state is None:
+            raise StateTransitionError("block state identity is incomplete")
+        replicas = tuple(
+            sorted(
+                replica
+                for mapped_block, replica in references.content_locations
+                if mapped_block == block_key
+            )
+        )
+        if state.replicas != replicas:
+            raise StateTransitionError("block state published replicas differ")
+        active_transfers = [
+            transfer_id
+            for transfer_id, (transfer_block, _, _) in references.transfers.items()
+            if transfer_block == block_key
+        ]
+        if len(active_transfers) > 1:
+            raise StateTransitionError("block state has multiple live transfers")
+        transfer_id = active_transfers[0] if active_transfers else None
+        direction = None
+        if transfer_id is not None:
+            action = references.transfer_actions[transfer_id]
+            direction = (
+                TransferDirection.D2H
+                if action == LedgerAction.SAVE
+                else TransferDirection.H2D
+            )
+        if (
+            state.inflight_transfer_id != transfer_id
+            or state.inflight_direction != direction
+        ):
+            raise StateTransitionError("block state inflight transfer differs")
+
+        tiers = {replica.tier for replica in replicas}
+        if state.reclaimed:
+            if replicas or transfer_id is not None:
+                raise StateTransitionError("freed block retains physical state")
+            if block_key in references.binding_blocks.values():
+                raise StateTransitionError("freed block retains a live binding")
+            if any(
+                references.allocations.get(replica) == block_key
+                for replica in references.allocations
+            ):
+                raise StateTransitionError("freed block retains an allocation")
+            expected_residency = ResidencyState.FREED
+        elif direction == TransferDirection.D2H:
+            expected_residency = ResidencyState.D2H_COPYING
+        elif direction == TransferDirection.H2D:
+            expected_residency = ResidencyState.H2D_COPYING
+        else:
+            expected_residency = {
+                frozenset(): ResidencyState.ABSENT,
+                frozenset({Tier.GPU}): ResidencyState.GPU_ONLY,
+                frozenset({Tier.CPU}): ResidencyState.CPU_ONLY,
+                frozenset({Tier.GPU, Tier.CPU}): ResidencyState.GPU_AND_CPU,
+            }[frozenset(tiers)]
+        if state.residency != expected_residency:
+            raise StateTransitionError("block state residency differs from replay")
+
+        prior = references.block_states.get(block_key)
+        if prior == state:
+            raise StateTransitionError("block state event has no causal state change")
+        prior_version = prior.location_version if prior is not None else 0
+        prior_gpu = (
+            next(
+                (replica for replica in prior.replicas if replica.tier == Tier.GPU),
+                None,
+            )
+            if prior is not None
+            else None
+        )
+        current_gpu = next(
+            (replica for replica in replicas if replica.tier == Tier.GPU),
+            None,
+        )
+        reclaimed_now = state.reclaimed and (prior is None or not prior.reclaimed)
+        version_delta = int(prior_gpu != current_gpu or reclaimed_now)
+        if state.location_version != prior_version + version_delta:
+            raise StateTransitionError("block location version is stale or skipped")
+        if (
+            prior is not None
+            and prior.reclaimed
+            and not state.reclaimed
+            and not replicas
+        ):
+            raise StateTransitionError("freed block reopened without published content")
+        references.block_states[block_key] = state
 
     def _resolve_parent(
         self,
@@ -722,8 +1102,19 @@ class EventLedger:
     ) -> None:
         require_text("event reason", event.reason)
         require_text("operation_id", event.operation_id)
+        require_text("batch_id", event.batch_id)
         require_optional_sha256("payload_digest", event.payload_digest)
         require_optional_sha256("observed_digest", event.observed_digest)
+        if (
+            type(event.batch_index) is not int
+            or type(event.batch_size) is not int
+            or event.batch_size <= 0
+            or not 0 <= event.batch_index < event.batch_size
+        ):
+            raise StateTransitionError("event batch coordinates are invalid")
+        batch_start = event.sequence - event.batch_index
+        if batch_start < 0 or event.batch_id != f"bat-{batch_start:012d}":
+            raise StateTransitionError("event batch identity is invalid")
         if event.timestamp_ns < 0 or event.timestamp_ns < last_timestamp:
             raise StateTransitionError("ledger timestamps must be non-decreasing")
         if (
@@ -741,10 +1132,15 @@ class EventLedger:
             LedgerAction.MAP,
             LedgerAction.UNMAP,
             LedgerAction.BIND,
+            LedgerAction.BIND_STATE,
             LedgerAction.RELEASE,
             LedgerAction.EVICT,
             LedgerAction.EXEC_MAP,
             LedgerAction.EXEC_UNMAP,
+            LedgerAction.WAITER_JOIN,
+            LedgerAction.WAITER_LEAVE,
+            LedgerAction.BLOCK_STATE,
+            LedgerAction.STREAM_SEAL,
         }
         transfers = {
             LedgerAction.SAVE,
@@ -775,7 +1171,10 @@ class EventLedger:
         }:
             raise StateTransitionError("invalid node status")
 
-        kv_actions = set(LedgerAction) - {LedgerAction.NODE}
+        kv_actions = set(LedgerAction) - {
+            LedgerAction.NODE,
+            LedgerAction.STREAM_SEAL,
+        }
         if event.action in kv_actions and event.block_key is None:
             raise StateTransitionError("KV event requires a block identity")
         physical_actions = {
@@ -822,7 +1221,14 @@ class EventLedger:
             raise StateTransitionError(
                 "event identity disagrees with its execution reference"
             )
-        if event.action in {LedgerAction.BIND, LedgerAction.RELEASE}:
+        binding_actions = {
+            LedgerAction.BIND,
+            LedgerAction.BIND_STATE,
+            LedgerAction.RELEASE,
+            LedgerAction.WAITER_JOIN,
+            LedgerAction.WAITER_LEAVE,
+        }
+        if event.action in binding_actions:
             require_text("binding_id", event.binding_id or "")
             if event.binding_kind is None:
                 raise StateTransitionError("binding event requires binding_kind")
@@ -844,6 +1250,45 @@ class EventLedger:
                 raise StateTransitionError(
                     "retention binding cannot carry an execution reference"
                 )
+        state_actions = {
+            LedgerAction.BIND,
+            LedgerAction.BIND_STATE,
+            LedgerAction.RELEASE,
+        }
+        if event.action in state_actions:
+            if event.binding_state_after is None:
+                raise StateTransitionError("binding event requires an after-state")
+            if event.action == LedgerAction.BIND:
+                if event.binding_state_before is not None:
+                    raise StateTransitionError("binding open carries a before-state")
+                valid_initial = (
+                    event.binding_kind == BindingKind.REQUEST
+                    and event.binding_state_after
+                    in {BindingState.REQUIRED, BindingState.RETAINED}
+                ) or (
+                    event.binding_kind == BindingKind.WORKFLOW_RETENTION
+                    and event.binding_state_after == BindingState.RETAINED
+                )
+                if not valid_initial:
+                    raise StateTransitionError("binding initial state is invalid")
+            elif event.action == LedgerAction.RELEASE:
+                if (
+                    event.binding_state_before is None
+                    or event.binding_state_after != BindingState.RELEASED
+                ):
+                    raise StateTransitionError("binding release states are invalid")
+            elif (
+                event.binding_kind != BindingKind.REQUEST
+                or event.binding_state_before is None
+                or event.binding_state_before == event.binding_state_after
+                or event.binding_state_after == BindingState.RELEASED
+            ):
+                raise StateTransitionError("binding state transition is invalid")
+        elif (
+            event.binding_state_before is not None
+            or event.binding_state_after is not None
+        ):
+            raise StateTransitionError("non-state event carries binding state")
         if event.action in {LedgerAction.EXEC_MAP, LedgerAction.EXEC_UNMAP}:
             require_text("execution binding_id", event.binding_id or "")
             if event.binding_kind != BindingKind.REQUEST:
@@ -902,11 +1347,73 @@ class EventLedger:
                 raise StateTransitionError(
                     "scheduled transfer has terminal observations"
                 )
+            if event.status == LedgerStatus.SCHEDULED and (
+                event.waiter_binding_ids_after
+            ):
+                raise StateTransitionError(
+                    "scheduled transfer must start with an empty waiter set"
+                )
             if event.status == LedgerStatus.COMPLETED and (
                 event.observed_byte_count != event.byte_count
                 or event.observed_digest != event.payload_digest
             ):
                 raise StateTransitionError("completed transfer payload is inconsistent")
+            if event.waiter_binding_ids_after is None:
+                raise StateTransitionError("transfer requires an exact waiter set")
+            if event.action == LedgerAction.SAVE and event.waiter_binding_ids_after:
+                raise StateTransitionError("D2H transfer cannot carry waiters")
+        elif event.action in {LedgerAction.WAITER_JOIN, LedgerAction.WAITER_LEAVE}:
+            require_text("waiter transfer_id", event.transfer_id or "")
+            if event.waiter_binding_ids_after is None:
+                raise StateTransitionError("waiter event requires an exact after-set")
+        elif event.waiter_binding_ids_after is not None:
+            raise StateTransitionError("non-waiter event carries a waiter set")
+        if event.waiter_binding_ids_after is not None:
+            values = event.waiter_binding_ids_after
+            if not isinstance(values, tuple):
+                raise StateTransitionError("waiter after-set must be a tuple")
+            if values != tuple(sorted(values)) or len(values) != len(set(values)):
+                raise StateTransitionError("waiter after-set must be sorted and unique")
+            for binding_id in values:
+                require_text("waiter binding ID", binding_id)
+        if event.action == LedgerAction.BLOCK_STATE:
+            if event.block_state_after is None:
+                raise StateTransitionError("block state action requires a snapshot")
+        elif event.block_state_after is not None:
+            raise StateTransitionError("non-block-state event carries a block snapshot")
+        if event.action == LedgerAction.STREAM_SEAL:
+            forbidden_values = (
+                event.parent_event_id,
+                event.workflow,
+                event.request_id,
+                event.node_id,
+                event.source_tier,
+                event.target_tier,
+                event.block_key,
+                event.binding_id,
+                event.binding_kind,
+                event.lease_id,
+                event.lease_deadline_ns,
+                event.transfer_id,
+                event.mapping_id,
+                event.execution_ref,
+                event.payload_digest,
+                event.observed_digest,
+                event.error,
+            )
+            if event.blocks or any(value is not None for value in forbidden_values):
+                raise StateTransitionError(
+                    "stream seal carries lifecycle resource data"
+                )
+            if any(
+                value != 0
+                for value in (
+                    event.payload_size,
+                    event.byte_count,
+                    event.observed_byte_count,
+                )
+            ):
+                raise StateTransitionError("stream seal carries byte metadata")
         if event.action == LedgerAction.ALLOCATE:
             if event.byte_count <= 0:
                 raise StateTransitionError("allocation capacity must be positive")
@@ -930,7 +1437,12 @@ class EventLedger:
             LedgerStatus.CANCELLED,
         }
         expected: tuple[LedgerAction, LedgerStatus] | None
-        if event.action in {LedgerAction.ALLOCATE, LedgerAction.BIND}:
+        if event.action in {
+            LedgerAction.ALLOCATE,
+            LedgerAction.BIND,
+            LedgerAction.BLOCK_STATE,
+            LedgerAction.STREAM_SEAL,
+        }:
             expected = None
         elif event.action == LedgerAction.NODE:
             expected = (
@@ -942,7 +1454,11 @@ class EventLedger:
             expected = (LedgerAction.ALLOCATE, LedgerStatus.COMPLETED)
         elif event.action == LedgerAction.UNMAP:
             expected = (LedgerAction.MAP, LedgerStatus.COMPLETED)
-        elif event.action in {LedgerAction.RELEASE, LedgerAction.EXEC_MAP}:
+        elif event.action in {
+            LedgerAction.BIND_STATE,
+            LedgerAction.RELEASE,
+            LedgerAction.EXEC_MAP,
+        }:
             expected = (LedgerAction.BIND, LedgerStatus.COMPLETED)
         elif event.action == LedgerAction.EXEC_UNMAP:
             expected = (LedgerAction.EXEC_MAP, LedgerStatus.COMPLETED)
@@ -962,8 +1478,18 @@ class EventLedger:
                 if event.status == LedgerStatus.SCHEDULED
                 else (event.action, LedgerStatus.SCHEDULED)
             )
+        elif event.action in {LedgerAction.WAITER_JOIN, LedgerAction.WAITER_LEAVE}:
+            expected = None
         else:
             raise StateTransitionError(f"unsupported action: {event.action.value}")
+
+        if event.action in {LedgerAction.WAITER_JOIN, LedgerAction.WAITER_LEAVE}:
+            if parent is None or (
+                parent.action not in {LedgerAction.LOAD, LedgerAction.PREFETCH}
+                or parent.status != LedgerStatus.SCHEDULED
+            ):
+                raise StateTransitionError("invalid parent for transfer waiter event")
+            expected = (parent.action, parent.status)
 
         if expected is None:
             if parent is not None:
@@ -1012,7 +1538,12 @@ class EventLedger:
             same_resource_actions.add(event.action)
         if event.action in same_resource_actions and parent.blocks != event.blocks:
             raise StateTransitionError("parent physical resource changed")
-        if event.binding_id and parent.binding_id != event.binding_id:
+        waiter_actions = {LedgerAction.WAITER_JOIN, LedgerAction.WAITER_LEAVE}
+        if (
+            event.binding_id
+            and event.action not in waiter_actions
+            and parent.binding_id != event.binding_id
+        ):
             raise StateTransitionError("parent binding identity changed")
         if (
             event.lease_id
@@ -1038,9 +1569,14 @@ class EventLedger:
             and parent.mapping_id != event.mapping_id
         ):
             raise StateTransitionError("parent mapping identity changed")
-        if event.workflow is not None and parent.workflow != event.workflow:
+        if (
+            event.workflow is not None
+            and event.action not in waiter_actions
+            and parent.workflow != event.workflow
+        ):
             raise StateTransitionError("parent workflow identity changed")
         binding_lineage_actions = {
+            LedgerAction.BIND_STATE,
             LedgerAction.RELEASE,
             LedgerAction.EXEC_MAP,
             LedgerAction.EXEC_UNMAP,
@@ -1089,12 +1625,176 @@ class EventLedger:
         ):
             raise StateTransitionError("unmap payload identity changed")
 
-    def audit(self, *, require_quiescent: bool = False) -> tuple[str, ...]:
+    @staticmethod
+    def _audit_batch_envelopes(
+        events: tuple[LifecycleEvent, ...],
+    ) -> tuple[str, ...]:
+        issues: list[str] = []
+        cursor = 0
+        while cursor < len(events):
+            first = events[cursor]
+            if type(first.batch_size) is not int or first.batch_size <= 0:
+                issues.append(f"invalid lifecycle batch size: {first.event_id}")
+                cursor += 1
+                continue
+            if (
+                type(first.batch_index) is not int
+                or first.batch_index < 0
+                or first.batch_index >= first.batch_size
+            ):
+                issues.append(f"invalid lifecycle batch index: {first.event_id}")
+                cursor += 1
+                continue
+            if first.batch_index != 0:
+                issues.append(f"batch does not start at index zero: {first.event_id}")
+                cursor += 1
+                continue
+            end = cursor + first.batch_size
+            if end > len(events):
+                issues.append(f"truncated lifecycle batch: {first.batch_id}")
+                break
+            batch = events[cursor:end]
+            expected_id = f"bat-{cursor:012d}"
+            for index, event in enumerate(batch):
+                if (
+                    event.batch_id != expected_id
+                    or event.batch_id != first.batch_id
+                    or event.batch_size != first.batch_size
+                    or event.batch_index != index
+                ):
+                    issues.append(f"inconsistent lifecycle batch: {first.batch_id}")
+                    break
+            cursor = end
+        return tuple(issues)
+
+    @staticmethod
+    def _validate_complete_batch(
+        batch: tuple[LifecycleEvent, ...],
+        *,
+        live: dict[str, set[str | ReplicaId]],
+        references: _ReferenceState,
+    ) -> None:
+        state_required_actions = {
+            LedgerAction.ALLOCATE,
+            LedgerAction.MAP,
+            LedgerAction.UNMAP,
+            LedgerAction.EVICT,
+            LedgerAction.SAVE,
+            LedgerAction.LOAD,
+            LedgerAction.PREFETCH,
+        }
+        state_blocks = {
+            event.block_key
+            for event in batch
+            if event.action in state_required_actions and event.block_key is not None
+        }
+        snapshot_events = [
+            event for event in batch if event.action == LedgerAction.BLOCK_STATE
+        ]
+        snapshot_blocks = {
+            event.block_key for event in snapshot_events if event.block_key is not None
+        }
+        if snapshot_blocks != state_blocks:
+            raise StateTransitionError(
+                "block snapshot lacks a same-batch physical state change"
+            )
+        for block_key in state_blocks:
+            block_events = [event for event in batch if event.block_key == block_key]
+            block_snapshots = [
+                event
+                for event in block_events
+                if event.action == LedgerAction.BLOCK_STATE
+            ]
+            if (
+                len(block_snapshots) != 1
+                or block_events[-1].action != LedgerAction.BLOCK_STATE
+            ):
+                raise StateTransitionError(
+                    "state-changing batch lacks one final block snapshot"
+                )
+
+        unbound_allocations = {
+            replica
+            for replica in live["allocation"]
+            if isinstance(replica, ReplicaId)
+            and replica not in references.mapped_allocations
+            and not any(
+                target == replica for _, target, _ in references.transfers.values()
+            )
+        }
+        if unbound_allocations:
+            raise StateTransitionError(
+                "live allocation is neither published nor transfer-reserved"
+            )
+
+        seal_events = [
+            event for event in batch if event.action == LedgerAction.STREAM_SEAL
+        ]
+        if seal_events and (len(batch) != 1 or not references.stream_sealed):
+            raise StateTransitionError("stream seal must be a singleton final batch")
+
+        mapped_bindings = {
+            binding_id
+            for _, _, _, binding_id in references.execution_locations.values()
+        }
+        live_bindings = {
+            binding_id
+            for binding_id in references.binding_states
+            if binding_id in live["binding"]
+        }
+        active_waiters: dict[str, str] = {}
+        for transfer_id in references.transfers:
+            for binding_id in references.transfer_waiters[transfer_id]:
+                if binding_id in active_waiters:
+                    raise StateTransitionError(
+                        "binding belongs to multiple active transfer waiter sets"
+                    )
+                active_waiters[binding_id] = transfer_id
+        for binding_id in live_bindings:
+            state = references.binding_states[binding_id]
+            is_mapped = binding_id in mapped_bindings
+            is_waiting = binding_id in active_waiters
+            if state == BindingState.REQUIRED and not is_mapped:
+                raise StateTransitionError("required binding lacks an execution map")
+            if state == BindingState.RETAINED and (is_mapped or is_waiting):
+                raise StateTransitionError("retained binding has a live service edge")
+            if state == BindingState.WAITING and (is_mapped or not is_waiting):
+                raise StateTransitionError("waiting binding lacks one transfer edge")
+        for binding_id in active_waiters:
+            if references.binding_states.get(binding_id) != BindingState.WAITING:
+                raise StateTransitionError("transfer waiter binding is not waiting")
+
+    @classmethod
+    def audit_detached(
+        cls,
+        events: tuple[LifecycleEvent, ...],
+        *,
+        run_id: str,
+        phase: str,
+        source: str,
+        require_quiescent: bool = False,
+        require_complete_state: bool = True,
+    ) -> tuple[str, ...]:
+        """Replay immutable external rows without trusting a live ledger."""
+
+        ledger = cls(run_id=run_id, phase=phase, source=source)
+        ledger._events = list(events)
+        return ledger.audit(
+            require_quiescent=require_quiescent,
+            require_complete_state=require_complete_state,
+        )
+
+    def audit(
+        self,
+        *,
+        require_quiescent: bool = False,
+        require_complete_state: bool = False,
+    ) -> tuple[str, ...]:
         """Replay independent lifecycle conservation checks."""
 
         with self._lock:
             events = tuple(self._events)
-        issues: list[str] = []
+        issues = list(self._audit_batch_envelopes(events))
         allocations: dict[ReplicaId, LifecycleEvent] = {}
         mappings: dict[str, LifecycleEvent] = {}
         bindings: dict[str, LifecycleEvent] = {}
@@ -1292,6 +1992,17 @@ class EventLedger:
                     nodes[key] = event
                 elif nodes.pop(key, None) is None:
                     issues.append(f"node terminal without start: {key}")
+            if require_complete_state and event.batch_index == event.batch_size - 1:
+                batch_start = expected_sequence - event.batch_index
+                batch = events[batch_start : expected_sequence + 1]
+                try:
+                    self._validate_complete_batch(
+                        batch,
+                        live=replay_live_identities,
+                        references=replay_references,
+                    )
+                except DAGKVError as exc:
+                    issues.append(f"invalid lifecycle batch {event.batch_id}: {exc}")
 
         if require_quiescent:
             live = {

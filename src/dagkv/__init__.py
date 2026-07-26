@@ -15,6 +15,18 @@ from dagkv.c1_leases import (
     SharedLeaseProfile,
     aggregate_shared_lease,
 )
+from dagkv.c1_lifecycle import (
+    LIFECYCLE_CLOCK_DOMAIN,
+    LIFECYCLE_SIDECAR_SCHEMA_VERSION,
+    CanonicalLifecycleEvidenceGate,
+    ClosedLifecycleArtifact,
+    LifecycleClosure,
+    LoadedLifecycleArtifact,
+    lifecycle_stream_digest,
+    load_lifecycle_artifact,
+    make_lifecycle_closure,
+    write_lifecycle_artifact,
+)
 from dagkv.c1_schedule import (
     SCHEDULE_CLOCK_DOMAIN,
     SCHEDULE_SIDECAR_SCHEMA_VERSION,
@@ -50,6 +62,7 @@ from dagkv.domain import (
     BindingKind,
     BindingState,
     BlockKey,
+    BlockStateSnapshot,
     DAGKVError,
     ExecutionRef,
     IdentityError,
@@ -76,6 +89,8 @@ from dagkv.orchestrator import LifecycleOrchestrator
 
 __all__ = [
     "PROBABILITY_SCALE",
+    "LIFECYCLE_CLOCK_DOMAIN",
+    "LIFECYCLE_SIDECAR_SCHEMA_VERSION",
     "SCHEDULE_CLOCK_DOMAIN",
     "SCHEDULE_SIDECAR_SCHEMA_VERSION",
     "AuditReport",
@@ -84,6 +99,9 @@ __all__ = [
     "BindingKind",
     "BindingState",
     "BlockKey",
+    "BlockStateSnapshot",
+    "CanonicalLifecycleEvidenceGate",
+    "ClosedLifecycleArtifact",
     "DAGKVError",
     "DMATerminalObservation",
     "DependenceGroup",
@@ -103,8 +121,10 @@ __all__ = [
     "LeasePriorityMode",
     "LeaseState",
     "LifecycleEvidenceGate",
+    "LifecycleClosure",
     "LifecycleOrchestrator",
     "LoadedScheduleArtifact",
+    "LoadedLifecycleArtifact",
     "MetricInterval",
     "NodeStatus",
     "NaturalScheduleClosure",
@@ -138,4 +158,8 @@ __all__ = [
     "validate_trace",
     "validate_trace_for_labels",
     "write_schedule_artifact",
+    "lifecycle_stream_digest",
+    "load_lifecycle_artifact",
+    "make_lifecycle_closure",
+    "write_lifecycle_artifact",
 ]

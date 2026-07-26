@@ -37,8 +37,9 @@ from dagkv.domain import (
     require_sha256,
     require_text,
 )
+from dagkv.ledger import LIFECYCLE_EVENT_SCHEMA_VERSION, EventLedger
 
-TRACE_SCHEMA_VERSION = "dagkv.m3.c1_trace.v2"
+TRACE_SCHEMA_VERSION = "dagkv.m3.c1_trace.v3"
 MAX_TRACE_BYTES = 64 * 1024 * 1024
 MAX_TRACE_LINE_BYTES = 4 * 1024 * 1024
 
@@ -203,6 +204,8 @@ def _validate_lifecycle_prefix(prefix: tuple[LifecycleEvent, ...]) -> None:
             raise TraceValidationError("lifecycle prefix contains a non-event value")
         if event.sequence != sequence:
             raise TraceValidationError("lifecycle prefix sequence is not contiguous")
+        if event.schema_version != LIFECYCLE_EVENT_SCHEMA_VERSION:
+            raise TraceValidationError("lifecycle prefix uses an unsupported schema")
         if event.event_id in event_ids:
             raise TraceValidationError("lifecycle prefix event ID is duplicated")
         event_ids.add(event.event_id)
@@ -214,6 +217,17 @@ def _validate_lifecycle_prefix(prefix: tuple[LifecycleEvent, ...]) -> None:
         if event.timestamp_ns < last_timestamp_ns:
             raise TraceValidationError("lifecycle prefix timestamps regress")
         last_timestamp_ns = event.timestamp_ns
+    if prefix:
+        run_id, phase, source = envelope or ("", "", "")
+        issues = EventLedger.audit_detached(
+            prefix,
+            run_id=run_id,
+            phase=phase,
+            source=source,
+            require_complete_state=True,
+        )
+        if issues:
+            raise TraceValidationError(f"lifecycle prefix replay failed: {issues[0]}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,6 +440,7 @@ class H2DExecMapService:
     disposition: ServiceDisposition
     transfer_id: str
     transfer_scheduled_event_id: str
+    waiter_join_event_id: str
     transfer_terminal_event_id: str
     exec_map_event_id: str
     waiter_binding_ids: tuple[str, ...]
@@ -436,6 +451,7 @@ class H2DExecMapService:
             "intent_record_id",
             "transfer_id",
             "transfer_scheduled_event_id",
+            "waiter_join_event_id",
             "transfer_terminal_event_id",
             "exec_map_event_id",
         ):
@@ -453,6 +469,7 @@ class H2DFailedService:
     disposition: ServiceDisposition
     transfer_id: str
     transfer_scheduled_event_id: str
+    waiter_join_event_id: str
     transfer_terminal_event_id: str
     waiter_binding_ids: tuple[str, ...]
 
@@ -462,6 +479,7 @@ class H2DFailedService:
             "intent_record_id",
             "transfer_id",
             "transfer_scheduled_event_id",
+            "waiter_join_event_id",
             "transfer_terminal_event_id",
         ):
             require_text(name, getattr(self, name))

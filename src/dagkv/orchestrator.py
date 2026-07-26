@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from threading import RLock
+from time import monotonic_ns
 
 from dagkv.c1_leases import LeaseOwnerSnapshot, SharedLeasePolicySnapshot
 from dagkv.c1_trace import (
@@ -23,6 +25,7 @@ from dagkv.domain import (
     BindingState,
     BlockKey,
     BlockRecord,
+    BlockStateSnapshot,
     ContentMapping,
     ExecutionMapping,
     ExecutionRef,
@@ -38,6 +41,7 @@ from dagkv.domain import (
     ReplicaId,
     ReplicaRecord,
     ReplicaReservation,
+    ResidencyState,
     StateTransitionError,
     Tier,
     Transfer,
@@ -87,6 +91,7 @@ class LifecycleOrchestrator:
             phase=phase,
             source=source,
             mutation_guard=self._guard_runtime_mutation,
+            require_complete_state=True,
         )
         self._trace_required = trace_required
         self._workflows: dict[WorkflowKey, WorkflowRecord] = {}
@@ -100,9 +105,16 @@ class LifecycleOrchestrator:
         self._execution_mapping_generations: dict[str, int] = {}
         self._committed_demand_ids: dict[
             str,
-            tuple[BlockKey, tuple[tuple[str, ExecutionRef], ...]],
+            tuple[
+                BlockKey,
+                tuple[tuple[str, ExecutionRef], ...],
+                ReplicaId,
+                LedgerAction,
+                int,
+            ],
         ] = {}
         self._demand_id_by_execution: dict[ExecutionRef, str] = {}
+        self._dispatched_demand_ids: set[str] = set()
         # Monotonic: removing an active waiter must not erase prior service.
         self._transfer_waiter_history: set[str] = set()
         self._transfers: dict[str, Transfer] = {}
@@ -112,6 +124,8 @@ class LifecycleOrchestrator:
         self._slot_generations: dict[tuple[Tier, str, str], int] = {}
         self._slot_occupants: dict[tuple[Tier, str, str], ReplicaId] = {}
         self._hard_failures: list[str] = []
+        self._runtime_poisoned: str | None = None
+        self._seal_event: LifecycleEvent | None = None
 
     @property
     def events(self) -> tuple[LifecycleEvent, ...]:
@@ -147,6 +161,35 @@ class LifecycleOrchestrator:
             except KeyError as exc:
                 raise IdentityError(f"unknown transfer: {transfer_id}") from exc
 
+    def seal_lifecycle(self) -> LifecycleEvent:
+        """Close the lifecycle stream at a sole-writer monotonic-clock boundary."""
+
+        with self._lock:
+            if self._seal_event is not None:
+                return self._seal_event
+            self._guard_runtime_mutation()
+            report = self.audit()
+            if not report.passed:
+                raise StateTransitionError(
+                    f"cannot seal an inconsistent lifecycle: {report.issues[0]}"
+                )
+            timestamp_ns = monotonic_ns()
+            if timestamp_ns < self._ledger.last_timestamp_ns:
+                raise StateTransitionError(
+                    "monotonic seal clock predates the lifecycle stream"
+                )
+            event = self._ledger.append(
+                EventDraft(
+                    action=LedgerAction.STREAM_SEAL,
+                    status=LedgerStatus.COMPLETED,
+                    reason="lifecycle_stream_closed",
+                    timestamp_ns=timestamp_ns,
+                    operation_id="lifecycle-stream-seal",
+                )
+            )
+            self._seal_event = event
+            return event
+
     def shared_lease_policy_snapshot(
         self,
         key: BlockKey,
@@ -172,6 +215,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             view = self._atomic_cutoff_view_locked(
                 key,
                 cutoff_ns=cutoff_ns,
@@ -205,6 +249,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             existing = self._workflows.get(spec.key)
             if existing is not None:
                 if existing.spec == spec:
@@ -239,6 +284,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             record = self._active_workflow(workflow)
             node = self._node(record, node_id)
             if node.status == NodeStatus.RUNNING:
@@ -261,9 +307,10 @@ class LifecycleOrchestrator:
                     node_id=node_id,
                 )
             )
-            node.status = NodeStatus.RUNNING
-            node.started_ns = timestamp_ns
-            node.scheduled_event_id = event.event_id
+            with self._committed_runtime_apply("start_node"):
+                node.status = NodeStatus.RUNNING
+                node.started_ns = timestamp_ns
+                node.scheduled_event_id = event.event_id
             return True
 
     def complete_node(
@@ -278,6 +325,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             record = self._workflow(workflow)
             node = self._node(record, node_id)
             if node.status == NodeStatus.DONE:
@@ -314,17 +362,18 @@ class LifecycleOrchestrator:
                     node_id=node_id,
                 )
             )
-            node.status = NodeStatus.DONE
-            node.terminal_ns = timestamp_ns
-            for successor_id in node.successors:
-                successor = record.nodes[successor_id]
-                if successor.status != NodeStatus.PENDING:
-                    continue
-                if all(
-                    record.nodes[parent].status == NodeStatus.DONE
-                    for parent in successor.predecessors
-                ):
-                    successor.status = NodeStatus.READY
+            with self._committed_runtime_apply("complete_node"):
+                node.status = NodeStatus.DONE
+                node.terminal_ns = timestamp_ns
+                for successor_id in node.successors:
+                    successor = record.nodes[successor_id]
+                    if successor.status != NodeStatus.PENDING:
+                        continue
+                    if all(
+                        record.nodes[parent].status == NodeStatus.DONE
+                        for parent in successor.predecessors
+                    ):
+                        successor.status = NodeStatus.READY
             return True
 
     def fail_node(
@@ -340,6 +389,7 @@ class LifecycleOrchestrator:
         self._guard_runtime_mutation()
         require_text("node error", error)
         with self._lock:
+            self._guard_runtime_mutation()
             record = self._workflow(workflow)
             node = self._node(record, node_id)
             if node.status == NodeStatus.FAILED:
@@ -370,6 +420,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             record = self._workflow(workflow)
             if record.status == WorkflowStatus.DONE:
                 if record.terminal_ns == timestamp_ns:
@@ -404,6 +455,7 @@ class LifecycleOrchestrator:
         self._guard_runtime_mutation()
         require_text("workflow error", error)
         with self._lock:
+            self._guard_runtime_mutation()
             record = self._workflow(workflow)
             if record.status == WorkflowStatus.FAILED:
                 if record.terminal_ns == timestamp_ns and record.error == error:
@@ -433,6 +485,7 @@ class LifecycleOrchestrator:
             raise IdentityError("initial replica must be on GPU")
         self._validate_replica_sizes(byte_capacity, payload_size)
         with self._lock:
+            self._guard_runtime_mutation()
             block = self._blocks.get(block_key)
             if block is not None and Tier.GPU in block.replicas:
                 existing = block.replicas[Tier.GPU]
@@ -463,6 +516,17 @@ class LifecycleOrchestrator:
             mapping_id = self._content_mapping_id(block_key, replica_id)
             if mapping_id in self._content_mappings:
                 raise StateTransitionError(f"duplicate content map: {mapping_id}")
+            block_for_plan = block or BlockRecord(
+                block_key=block_key,
+                payload_size=payload_size,
+                payload_digest=payload_digest,
+            )
+            state_after = self._planned_block_state(
+                block_for_plan,
+                replicas=(replica_id,),
+                location_version=block_for_plan.location_version + 1,
+                reclaimed=False,
+            )
             events = self._ledger.append_batch(
                 (
                     self._allocation_draft(
@@ -488,33 +552,36 @@ class LifecycleOrchestrator:
                         payload_size=payload_size,
                         payload_digest=payload_digest,
                     ),
+                    self._block_state_draft(
+                        block_key,
+                        state_after,
+                        timestamp_ns=timestamp_ns,
+                        reason="gpu_content_published",
+                    ),
                 )
             )
-            block = block or BlockRecord(
-                block_key=block_key,
-                payload_size=payload_size,
-                payload_digest=payload_digest,
-            )
-            block.payload_size = payload_size
-            block.payload_digest = payload_digest
-            block.reclaimed = False
-            block.location_version += 1
-            block.replicas[Tier.GPU] = ReplicaRecord(
-                replica_id=replica_id,
-                byte_capacity=byte_capacity,
-                payload_size=payload_size,
-                payload_digest=payload_digest,
-                allocate_event_id=events[0].event_id,
-                mapping_id=mapping_id,
-            )
-            self._blocks[block_key] = block
-            self._content_mappings[mapping_id] = ContentMapping(
-                mapping_id=mapping_id,
-                block_key=block_key,
-                replica_id=replica_id,
-                map_event_id=events[1].event_id,
-            )
-            self._occupy_new_slot(replica_id)
+            with self._committed_runtime_apply("register_gpu_block"):
+                block = block_for_plan
+                block.payload_size = payload_size
+                block.payload_digest = payload_digest
+                block.reclaimed = False
+                block.location_version += 1
+                block.replicas[Tier.GPU] = ReplicaRecord(
+                    replica_id=replica_id,
+                    byte_capacity=byte_capacity,
+                    payload_size=payload_size,
+                    payload_digest=payload_digest,
+                    allocate_event_id=events[0].event_id,
+                    mapping_id=mapping_id,
+                )
+                self._blocks[block_key] = block
+                self._content_mappings[mapping_id] = ContentMapping(
+                    mapping_id=mapping_id,
+                    block_key=block_key,
+                    replica_id=replica_id,
+                    map_event_id=events[1].event_id,
+                )
+                self._occupy_new_slot(replica_id)
             return True
 
     def bind_owner(
@@ -533,6 +600,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             if (
                 self._trace_required
                 and kind == BindingKind.REQUEST
@@ -615,6 +683,7 @@ class LifecycleOrchestrator:
                 block_key=block_key,
                 binding_id=handle.binding_id,
                 binding_kind=kind,
+                binding_state_after=state,
                 execution_ref=execution_ref,
             )
             drafts = [bind_draft]
@@ -644,30 +713,35 @@ class LifecycleOrchestrator:
                     )
                 )
             events = self._ledger.append_batch(drafts)
-            binding.bind_event_id = events[0].event_id
-            self._bindings[handle.binding_id] = binding
-            if execution_ref is not None:
-                self._execution_owners[execution_ref] = handle.binding_id
-                self._execution_history[execution_ref] = (
-                    block_key,
-                    handle.binding_id,
-                )
-            if mapping_generation is not None:
-                self._execution_mapping_generations[handle.binding_id] = (
-                    mapping_generation
-                )
-            workflow.binding_ids.add(handle.binding_id)
-            block.binding_ids.add(handle.binding_id)
-            if mapping_id is not None and execution_ref is not None and gpu is not None:
-                self._execution_mappings[execution_ref] = ExecutionMapping(
-                    mapping_id=mapping_id,
-                    execution_ref=execution_ref,
-                    binding_id=handle.binding_id,
-                    block_key=block_key,
-                    gpu_replica=gpu.replica_id,
-                    location_version=block.location_version,
-                    map_event_id=events[1].event_id,
-                )
+            with self._committed_runtime_apply("bind_owner"):
+                binding.bind_event_id = events[0].event_id
+                self._bindings[handle.binding_id] = binding
+                if execution_ref is not None:
+                    self._execution_owners[execution_ref] = handle.binding_id
+                    self._execution_history[execution_ref] = (
+                        block_key,
+                        handle.binding_id,
+                    )
+                if mapping_generation is not None:
+                    self._execution_mapping_generations[handle.binding_id] = (
+                        mapping_generation
+                    )
+                workflow.binding_ids.add(handle.binding_id)
+                block.binding_ids.add(handle.binding_id)
+                if (
+                    mapping_id is not None
+                    and execution_ref is not None
+                    and gpu is not None
+                ):
+                    self._execution_mappings[execution_ref] = ExecutionMapping(
+                        mapping_id=mapping_id,
+                        execution_ref=execution_ref,
+                        binding_id=handle.binding_id,
+                        block_key=block_key,
+                        gpu_replica=gpu.replica_id,
+                        location_version=block.location_version,
+                        map_event_id=events[1].event_id,
+                    )
             return handle
 
     def set_binding_state(
@@ -686,6 +760,7 @@ class LifecycleOrchestrator:
                 "waiting and released states require lifecycle-specific operations"
             )
         with self._lock:
+            self._guard_runtime_mutation()
             binding = self._binding(handle)
             if not binding.active:
                 raise StateTransitionError("released binding cannot transition")
@@ -700,6 +775,24 @@ class LifecycleOrchestrator:
             mapping = self._mapping_for_binding(binding)
             drafts: list[EventDraft] = []
             new_mapping: tuple[str, ReplicaRecord, int] | None = None
+            if binding.state == BindingState.WAITING:
+                if state != BindingState.RETAINED:
+                    raise StateTransitionError(
+                        "waiting binding can only detach from its active transfer"
+                    )
+                transfer = self._active_waiter_transfer(binding.binding_id)
+                waiter_ids = set(transfer.waiter_binding_ids)
+                waiter_ids.remove(binding.binding_id)
+                drafts.append(
+                    self._waiter_draft(
+                        transfer,
+                        binding,
+                        LedgerAction.WAITER_LEAVE,
+                        waiter_ids,
+                        timestamp_ns=timestamp_ns,
+                        reason=reason,
+                    )
+                )
             if state == BindingState.RETAINED:
                 if mapping is not None:
                     drafts.append(
@@ -745,26 +838,39 @@ class LifecycleOrchestrator:
                     raise StateTransitionError(
                         "binding points at a stale GPU generation"
                     )
+            drafts.append(
+                self._binding_state_draft(
+                    binding,
+                    state,
+                    timestamp_ns=timestamp_ns,
+                    reason=reason,
+                )
+            )
             events = self._ledger.append_batch(drafts)
-            if mapping is not None and state == BindingState.RETAINED:
-                self._execution_mappings.pop(mapping.execution_ref)
-            if new_mapping is not None and binding.execution_ref is not None:
-                mapping_id, gpu, mapping_generation = new_mapping
-                block = self._block(binding.block_key)
-                self._execution_mappings[binding.execution_ref] = ExecutionMapping(
-                    mapping_id=mapping_id,
-                    execution_ref=binding.execution_ref,
-                    binding_id=binding.binding_id,
-                    block_key=binding.block_key,
-                    gpu_replica=gpu.replica_id,
-                    location_version=block.location_version,
-                    map_event_id=events[-1].event_id,
-                )
-                self._execution_mapping_generations[binding.binding_id] = (
-                    mapping_generation
-                )
-            binding.transition(state)
-            self._remove_waiter(binding.binding_id)
+            with self._committed_runtime_apply("set_binding_state"):
+                if mapping is not None and state == BindingState.RETAINED:
+                    self._execution_mappings.pop(mapping.execution_ref)
+                if new_mapping is not None and binding.execution_ref is not None:
+                    mapping_id, gpu, mapping_generation = new_mapping
+                    block = self._block(binding.block_key)
+                    self._execution_mappings[binding.execution_ref] = ExecutionMapping(
+                        mapping_id=mapping_id,
+                        execution_ref=binding.execution_ref,
+                        binding_id=binding.binding_id,
+                        block_key=binding.block_key,
+                        gpu_replica=gpu.replica_id,
+                        location_version=block.location_version,
+                        map_event_id=next(
+                            event.event_id
+                            for event in events
+                            if event.operation_id == mapping_id
+                        ),
+                    )
+                    self._execution_mapping_generations[binding.binding_id] = (
+                        mapping_generation
+                    )
+                binding.transition(state)
+                self._remove_waiter(binding.binding_id)
             return True
 
     def open_lease(
@@ -780,6 +886,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             binding = self._binding(handle)
             if not binding.active or binding.kind != BindingKind.WORKFLOW_RETENTION:
                 raise StateTransitionError("lease requires an active retention binding")
@@ -821,9 +928,10 @@ class LifecycleOrchestrator:
                     lease_deadline_ns=deadline_ns,
                 )
             )
-            lease.scheduled_event_id = event.event_id
-            self._leases[lease_id] = lease
-            self._block(binding.block_key).lease_ids.add(lease_id)
+            with self._committed_runtime_apply("open_lease"):
+                lease.scheduled_event_id = event.event_id
+                self._leases[lease_id] = lease
+                self._block(binding.block_key).lease_ids.add(lease_id)
             return lease_id
 
     def terminate_lease(
@@ -839,6 +947,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             binding = self._binding(handle)
             lease = self._lease_for_binding(lease_id, binding)
             if not lease.active:
@@ -856,8 +965,9 @@ class LifecycleOrchestrator:
                 timestamp_ns=timestamp_ns,
                 error=error,
             )
-            lease.terminate(state, timestamp_ns, error=error)
-            self._block(lease.block_key).lease_ids.discard(lease_id)
+            with self._committed_runtime_apply("terminate_lease"):
+                lease.terminate(state, timestamp_ns, error=error)
+                self._block(lease.block_key).lease_ids.discard(lease_id)
             return True
 
     def expire_leases(self, *, timestamp_ns: int) -> tuple[str, ...]:
@@ -865,6 +975,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             due = sorted(
                 lease.lease_id
                 for lease in self._leases.values()
@@ -896,6 +1007,7 @@ class LifecycleOrchestrator:
         if target_replica.tier != Tier.CPU:
             raise IdentityError("D2H target must be CPU")
         with self._lock:
+            self._guard_runtime_mutation()
             block = self._block(block_key)
             source = block.replicas.get(Tier.GPU)
             if source is None:
@@ -946,7 +1058,7 @@ class LifecycleOrchestrator:
         """Publish residency or coalesce the logical consumers in this call.
 
         A traced adapter uses a fresh demand commit ID for each new scheduled
-        access batch and reuses that ID only when retrying the same batch.
+        access batch. Reuse is limited to an event-free replay of that batch.
         """
 
         self._guard_runtime_mutation()
@@ -955,6 +1067,7 @@ class LifecycleOrchestrator:
         if action not in {LedgerAction.LOAD, LedgerAction.PREFETCH}:
             raise IdentityError("H2D action must be load or prefetch")
         with self._lock:
+            self._guard_runtime_mutation()
             waiter_handles_tuple = tuple(waiter_handles)
             block = self._block(block_key)
             waiters = self._validate_waiters(block_key, waiter_handles_tuple)
@@ -1001,7 +1114,14 @@ class LifecycleOrchestrator:
                 or demand_commit_id is not None
             )
             demand_signature: (
-                tuple[BlockKey, tuple[tuple[str, ExecutionRef], ...]] | None
+                tuple[
+                    BlockKey,
+                    tuple[tuple[str, ExecutionRef], ...],
+                    ReplicaId,
+                    LedgerAction,
+                    int,
+                ]
+                | None
             ) = None
             demand_waiters: tuple[OwnerBinding, ...] = ()
             if waiters and trace_gate_enabled:
@@ -1025,6 +1145,9 @@ class LifecycleOrchestrator:
                         for binding_id, execution_ref in identified_waiters
                         if execution_ref is not None
                     ),
+                    target_replica,
+                    action,
+                    timestamp_ns,
                 )
                 prior_signature = self._committed_demand_ids.get(demand_commit_id)
                 if prior_signature is None:
@@ -1047,6 +1170,12 @@ class LifecycleOrchestrator:
                 elif prior_signature != demand_signature:
                     raise IdentityError(
                         "demand commit ID was reused for another logical demand"
+                    )
+                elif demand_commit_id in self._dispatched_demand_ids:
+                    self._validate_idempotent_demand_replay(
+                        block,
+                        waiters,
+                        gpu=gpu,
                     )
             elif not waiters and (
                 demand_committer is not None or demand_commit_id is not None
@@ -1113,13 +1242,49 @@ class LifecycleOrchestrator:
                     timestamp_ns=timestamp_ns,
                     reason="gpu_fast_path",
                 )
+                if demand_commit_id is not None:
+                    self._dispatched_demand_ids.add(demand_commit_id)
                 return None
             if block.inflight_transfer_id is not None:
                 transfer = self._transfers[block.inflight_transfer_id]
-                for binding in waiters:
-                    self._prepare_waiter(binding)
-                    transfer.waiter_binding_ids.add(binding.binding_id)
-                    self._transfer_waiter_history.add(binding.binding_id)
+                drafts: list[EventDraft] = []
+                waiter_ids = set(transfer.waiter_binding_ids)
+                ordered_waiters = tuple(
+                    sorted(waiters, key=lambda item: item.binding_id)
+                )
+                for binding in ordered_waiters:
+                    if (
+                        binding.state == BindingState.WAITING
+                        and binding.binding_id in waiter_ids
+                    ):
+                        continue
+                    drafts.append(
+                        self._binding_state_draft(
+                            binding,
+                            BindingState.WAITING,
+                            timestamp_ns=timestamp_ns,
+                            reason="coalesced_h2d_waiter_prepared",
+                        )
+                    )
+                    waiter_ids.add(binding.binding_id)
+                    drafts.append(
+                        self._waiter_draft(
+                            transfer,
+                            binding,
+                            LedgerAction.WAITER_JOIN,
+                            waiter_ids,
+                            timestamp_ns=timestamp_ns,
+                            reason="coalesced_h2d_waiter_joined",
+                        )
+                    )
+                self._ledger.append_batch(drafts)
+                with self._committed_runtime_apply("join_coalesced_h2d"):
+                    for binding in ordered_waiters:
+                        self._prepare_waiter(binding)
+                        transfer.waiter_binding_ids.add(binding.binding_id)
+                        self._transfer_waiter_history.add(binding.binding_id)
+                if demand_commit_id is not None:
+                    self._dispatched_demand_ids.add(demand_commit_id)
                 return self._transfer_command(transfer)
             source = block.replicas.get(Tier.CPU)
             if source is None:  # pragma: no cover - protected by locked preflight
@@ -1135,8 +1300,8 @@ class LifecycleOrchestrator:
                 timestamp_ns=timestamp_ns,
                 reason=reason,
             )
-            for binding in waiters:
-                self._prepare_waiter(binding)
+            if demand_commit_id is not None:
+                self._dispatched_demand_ids.add(demand_commit_id)
             return command
 
     def complete_transfer(
@@ -1152,6 +1317,7 @@ class LifecycleOrchestrator:
         self._guard_runtime_mutation()
         require_sha256("observed_digest", observed_digest)
         with self._lock:
+            self._guard_runtime_mutation()
             transfer = self._transfer(transfer_id)
             if not transfer.active:
                 return transfer.terminate(
@@ -1203,6 +1369,7 @@ class LifecycleOrchestrator:
         self._guard_runtime_mutation()
         require_text("transfer error", error)
         with self._lock:
+            self._guard_runtime_mutation()
             transfer = self._transfer(transfer_id)
             if not transfer.active:
                 return transfer.terminate(
@@ -1240,6 +1407,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             transfer = self._transfer(transfer_id)
             if not transfer.active:
                 return transfer.terminate(
@@ -1277,6 +1445,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             block = self._block(block_key)
             gpu = block.replicas.get(Tier.GPU)
             if gpu is None:
@@ -1315,6 +1484,11 @@ class LifecycleOrchestrator:
             if mappings:
                 raise StateTransitionError("execution mappings remain on GPU drop")
             content_map = self._content_mappings[gpu.mapping_id]
+            remaining_replicas = tuple(
+                replica.replica_id
+                for tier, replica in block.replicas.items()
+                if tier != Tier.GPU
+            )
             drafts = (
                 EventDraft(
                     action=LedgerAction.UNMAP,
@@ -1335,12 +1509,24 @@ class LifecycleOrchestrator:
                     timestamp_ns=timestamp_ns,
                     reason=reason,
                 ),
+                self._block_state_draft(
+                    block_key,
+                    self._planned_block_state(
+                        block,
+                        replicas=remaining_replicas,
+                        location_version=block.location_version + 1,
+                        reclaimed=False,
+                    ),
+                    timestamp_ns=timestamp_ns,
+                    reason="gpu_dropped_state",
+                ),
             )
             self._ledger.append_batch(drafts)
-            self._content_mappings.pop(gpu.mapping_id)
-            block.replicas.pop(Tier.GPU)
-            block.location_version += 1
-            self._free_slot(gpu.replica_id)
+            with self._committed_runtime_apply("drop_gpu"):
+                self._content_mappings.pop(gpu.mapping_id)
+                block.replicas.pop(Tier.GPU)
+                block.location_version += 1
+                self._free_slot(gpu.replica_id)
             return True
 
     def release_binding(
@@ -1354,6 +1540,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             binding = self._binding(handle)
             if not binding.active:
                 return False
@@ -1363,7 +1550,8 @@ class LifecycleOrchestrator:
                 reason=reason,
             )
             self._ledger.append_batch(plan.drafts)
-            self._commit_binding_release(plan)
+            with self._committed_runtime_apply("release_binding"):
+                self._commit_binding_release(plan)
             return True
 
     def reclaim(
@@ -1379,6 +1567,7 @@ class LifecycleOrchestrator:
 
         self._guard_runtime_mutation()
         with self._lock:
+            self._guard_runtime_mutation()
             block = self._block(block_key)
             if block.reclaimed:
                 return False
@@ -1444,13 +1633,27 @@ class LifecycleOrchestrator:
                         ),
                     )
                 )
+            drafts.append(
+                self._block_state_draft(
+                    block_key,
+                    self._planned_block_state(
+                        block,
+                        replicas=(),
+                        location_version=block.location_version + 1,
+                        reclaimed=True,
+                    ),
+                    timestamp_ns=timestamp_ns,
+                    reason="block_reclaimed_state",
+                )
+            )
             self._ledger.append_batch(drafts)
-            for replica in replicas:
-                self._content_mappings.pop(replica.mapping_id)
-                self._free_slot(replica.replica_id)
-            block.replicas.clear()
-            block.reclaimed = True
-            block.location_version += 1
+            with self._committed_runtime_apply("reclaim"):
+                for replica in replicas:
+                    self._content_mappings.pop(replica.mapping_id)
+                    self._free_slot(replica.replica_id)
+                block.replicas.clear()
+                block.reclaimed = True
+                block.location_version += 1
             return True
 
     def is_ready(self, handle: BindingHandle) -> bool:
@@ -1511,7 +1714,12 @@ class LifecycleOrchestrator:
                 active_transfers,
             )
             self._audit_slots(issues)
-            issues.extend(self._ledger.audit(require_quiescent=require_quiescent))
+            issues.extend(
+                self._ledger.audit(
+                    require_quiescent=require_quiescent,
+                    require_complete_state=True,
+                )
+            )
 
             ledger_counts = self._ledger.live_counts()
             runtime_counts = {
@@ -1528,6 +1736,90 @@ class LifecycleOrchestrator:
                     issues.append(
                         f"{name} ledger/runtime mismatch: "
                         f"{ledger_count} != {runtime_count}"
+                    )
+
+            runtime_block_states = {
+                key: self._planned_block_state(
+                    block,
+                    inflight_transfer_id=block.inflight_transfer_id,
+                    inflight_direction=block.inflight_direction,
+                    reclaimed=block.reclaimed,
+                )
+                for key, block in self._blocks.items()
+            }
+            ledger_block_states = self._ledger.block_states()
+            if ledger_block_states != runtime_block_states:
+                issues.append("block state ledger/runtime mismatch")
+
+            runtime_binding_states = {
+                binding_id: binding.state
+                for binding_id, binding in active_bindings.items()
+            }
+            ledger_binding_states = self._ledger.binding_states()
+            if ledger_binding_states != runtime_binding_states:
+                issues.append("binding state ledger/runtime mismatch")
+
+            runtime_transfer_waiters = {
+                transfer_id: frozenset(transfer.waiter_binding_ids)
+                for transfer_id, transfer in active_transfers.items()
+            }
+            ledger_transfer_waiters = self._ledger.active_transfer_waiters()
+            if ledger_transfer_waiters != runtime_transfer_waiters:
+                issues.append("transfer waiter ledger/runtime mismatch")
+            if self._ledger.transfer_waiter_history() != frozenset(
+                self._transfer_waiter_history
+            ):
+                issues.append("transfer waiter history ledger/runtime mismatch")
+
+            ledger_transfers = self._ledger.transfer_records()
+            if set(ledger_transfers) != set(self._transfers):
+                issues.append("transfer history ledger/runtime identity mismatch")
+            terminal_status = {
+                TransferState.SCHEDULED: LedgerStatus.SCHEDULED,
+                TransferState.COMPLETED: LedgerStatus.COMPLETED,
+                TransferState.FAILED: LedgerStatus.FAILED,
+                TransferState.CANCELLED: LedgerStatus.CANCELLED,
+            }
+            for transfer_id in sorted(set(ledger_transfers) & set(self._transfers)):
+                ledger_transfer = ledger_transfers[transfer_id]
+                runtime_transfer = self._transfers[transfer_id]
+                observed = (
+                    runtime_transfer.transfer_id,
+                    runtime_transfer.ledger_action,
+                    runtime_transfer.block_key,
+                    runtime_transfer.source_replica,
+                    runtime_transfer.target_replica,
+                    terminal_status[runtime_transfer.state],
+                    runtime_transfer.started_ns,
+                    runtime_transfer.terminal_ns,
+                    runtime_transfer.declared_bytes,
+                    runtime_transfer.observed_bytes,
+                    runtime_transfer.payload_digest,
+                    runtime_transfer.observed_digest,
+                    runtime_transfer.error,
+                    runtime_transfer.scheduled_event_id,
+                    tuple(sorted(runtime_transfer.waiter_binding_ids)),
+                )
+                expected = (
+                    ledger_transfer.transfer_id,
+                    ledger_transfer.action,
+                    ledger_transfer.block_key,
+                    ledger_transfer.source_replica,
+                    ledger_transfer.target_replica,
+                    ledger_transfer.status,
+                    ledger_transfer.started_ns,
+                    ledger_transfer.terminal_ns,
+                    ledger_transfer.declared_bytes,
+                    ledger_transfer.observed_bytes,
+                    ledger_transfer.payload_digest,
+                    ledger_transfer.observed_digest,
+                    ledger_transfer.error,
+                    ledger_transfer.scheduled_event_id,
+                    ledger_transfer.waiter_binding_ids,
+                )
+                if observed != expected:
+                    issues.append(
+                        f"transfer history ledger/runtime mismatch: {transfer_id}"
                     )
             if require_quiescent:
                 active_workflows = [
@@ -1628,10 +1920,32 @@ class LifecycleOrchestrator:
             raise StateTransitionError("trace receipt view digest differs from runtime")
 
     def _guard_runtime_mutation(self) -> None:
+        if self._runtime_poisoned is not None:
+            raise StateTransitionError(
+                f"runtime is poisoned after a committed apply failure: "
+                f"{self._runtime_poisoned}"
+            )
+        if self._seal_event is not None:
+            raise StateTransitionError("lifecycle stream is sealed")
         if self._trace_callback_active:
             raise StateTransitionError(
                 "runtime mutation from a trace committer callback is forbidden"
             )
+
+    @contextmanager
+    def _committed_runtime_apply(self, operation: str) -> Iterator[None]:
+        """Poison the writer if in-memory apply fails after ledger commit."""
+
+        try:
+            yield
+        except BaseException as exc:
+            issue = (
+                f"post-ledger runtime apply failed for {operation}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            self._runtime_poisoned = issue
+            self._hard_failures.append(issue)
+            raise
 
     def _workflow(self, key: WorkflowKey) -> WorkflowRecord:
         try:
@@ -1735,6 +2049,128 @@ class LifecycleOrchestrator:
         if self._slot_occupants.get(slot) != replica_id:
             raise StateTransitionError("physical slot occupant changed before release")
         self._slot_occupants.pop(slot)
+
+    @staticmethod
+    def _planned_block_state(
+        block: BlockRecord,
+        *,
+        replicas: Iterable[ReplicaId] | None = None,
+        location_version: int | None = None,
+        inflight_transfer_id: str | None = None,
+        inflight_direction: TransferDirection | None = None,
+        reclaimed: bool | None = None,
+    ) -> BlockStateSnapshot:
+        replica_ids = tuple(
+            sorted(
+                replicas
+                if replicas is not None
+                else (replica.replica_id for replica in block.replicas.values())
+            )
+        )
+        final_reclaimed = block.reclaimed if reclaimed is None else reclaimed
+        if final_reclaimed:
+            residency = ResidencyState.FREED
+        elif inflight_direction == TransferDirection.D2H:
+            residency = ResidencyState.D2H_COPYING
+        elif inflight_direction == TransferDirection.H2D:
+            residency = ResidencyState.H2D_COPYING
+        else:
+            tiers = frozenset(replica.tier for replica in replica_ids)
+            residency = {
+                frozenset(): ResidencyState.ABSENT,
+                frozenset({Tier.GPU}): ResidencyState.GPU_ONLY,
+                frozenset({Tier.CPU}): ResidencyState.CPU_ONLY,
+                frozenset({Tier.GPU, Tier.CPU}): ResidencyState.GPU_AND_CPU,
+            }[tiers]
+        return BlockStateSnapshot(
+            location_version=(
+                block.location_version if location_version is None else location_version
+            ),
+            residency=residency,
+            replicas=replica_ids,
+            inflight_transfer_id=inflight_transfer_id,
+            inflight_direction=inflight_direction,
+            reclaimed=final_reclaimed,
+        )
+
+    @staticmethod
+    def _block_state_draft(
+        block_key: BlockKey,
+        state: BlockStateSnapshot,
+        *,
+        timestamp_ns: int,
+        reason: str,
+    ) -> EventDraft:
+        return EventDraft(
+            action=LedgerAction.BLOCK_STATE,
+            status=LedgerStatus.COMPLETED,
+            reason=reason,
+            timestamp_ns=timestamp_ns,
+            operation_id=(
+                f"block-state:{block_key.content_digest}:"
+                f"{state.location_version}:{state.residency.value}"
+            ),
+            block_key=block_key,
+            block_state_after=state,
+        )
+
+    @staticmethod
+    def _binding_state_draft(
+        binding: OwnerBinding,
+        state: BindingState,
+        *,
+        timestamp_ns: int,
+        reason: str,
+    ) -> EventDraft:
+        if binding.bind_event_id is None:
+            raise StateTransitionError("binding state transition lacks its open event")
+        return EventDraft(
+            action=LedgerAction.BIND_STATE,
+            status=LedgerStatus.COMPLETED,
+            reason=reason,
+            timestamp_ns=timestamp_ns,
+            operation_id=binding.binding_id,
+            parent_event_id=binding.bind_event_id,
+            workflow=binding.workflow,
+            request_id=binding.request_id,
+            node_id=binding.node_id,
+            block_key=binding.block_key,
+            binding_id=binding.binding_id,
+            binding_kind=binding.kind,
+            binding_state_before=binding.state,
+            binding_state_after=state,
+            execution_ref=binding.execution_ref,
+        )
+
+    @staticmethod
+    def _waiter_draft(
+        transfer: Transfer,
+        binding: OwnerBinding,
+        action: LedgerAction,
+        waiter_binding_ids_after: Iterable[str],
+        *,
+        timestamp_ns: int,
+        reason: str,
+    ) -> EventDraft:
+        if action not in {LedgerAction.WAITER_JOIN, LedgerAction.WAITER_LEAVE}:
+            raise StateTransitionError("invalid waiter ledger action")
+        return EventDraft(
+            action=action,
+            status=LedgerStatus.COMPLETED,
+            reason=reason,
+            timestamp_ns=timestamp_ns,
+            operation_id=f"{transfer.transfer_id}:{binding.binding_id}:{action.value}",
+            parent_event_id=transfer.scheduled_event_id,
+            workflow=binding.workflow,
+            request_id=binding.request_id,
+            node_id=binding.node_id,
+            block_key=binding.block_key,
+            binding_id=binding.binding_id,
+            binding_kind=binding.kind,
+            transfer_id=transfer.transfer_id,
+            execution_ref=binding.execution_ref,
+            waiter_binding_ids_after=tuple(sorted(waiter_binding_ids_after)),
+        )
 
     def _allocation_draft(
         self,
@@ -2031,6 +2467,43 @@ class LifecycleOrchestrator:
                     "fresh demand waiter has prior transfer-service history"
                 )
 
+    def _validate_idempotent_demand_replay(
+        self,
+        block: BlockRecord,
+        waiters: tuple[OwnerBinding, ...],
+        *,
+        gpu: ReplicaRecord | None,
+    ) -> None:
+        if gpu is not None:
+            if all(
+                binding.state == BindingState.REQUIRED
+                and (mapping := self._mapping_for_binding(binding)) is not None
+                and mapping.gpu_replica == gpu.replica_id
+                for binding in waiters
+            ):
+                return
+            raise StateTransitionError(
+                "committed demand replay would create a second resident service"
+            )
+        transfer = (
+            self._transfers.get(block.inflight_transfer_id)
+            if block.inflight_transfer_id is not None
+            else None
+        )
+        if (
+            transfer is not None
+            and transfer.active
+            and all(
+                binding.state == BindingState.WAITING
+                and binding.binding_id in transfer.waiter_binding_ids
+                for binding in waiters
+            )
+        ):
+            return
+        raise StateTransitionError(
+            "committed demand replay would create a second H2D service"
+        )
+
     def _validate_waiters(
         self,
         block_key: BlockKey,
@@ -2103,7 +2576,7 @@ class LifecycleOrchestrator:
     ) -> None:
         pending: list[tuple[OwnerBinding, str, int]] = []
         drafts: list[EventDraft] = []
-        for binding in waiters:
+        for binding in sorted(waiters, key=lambda item: item.binding_id):
             self._require_running_binding_node(binding)
             mapping = self._mapping_for_binding(binding)
             if mapping is not None:
@@ -2136,24 +2609,34 @@ class LifecycleOrchestrator:
                     reason=reason,
                 )
             )
+            drafts.append(
+                self._binding_state_draft(
+                    binding,
+                    BindingState.REQUIRED,
+                    timestamp_ns=timestamp_ns,
+                    reason=reason,
+                )
+            )
             pending.append((binding, mapping_id, mapping_generation))
         events = self._ledger.append_batch(drafts)
-        for event, (binding, mapping_id, mapping_generation) in zip(
-            events, pending, strict=True
-        ):
-            if binding.execution_ref is None:
-                raise StateTransitionError("request waiter lost execution identity")
-            self._execution_mappings[binding.execution_ref] = ExecutionMapping(
-                mapping_id=mapping_id,
-                execution_ref=binding.execution_ref,
-                binding_id=binding.binding_id,
-                block_key=binding.block_key,
-                gpu_replica=gpu.replica_id,
-                location_version=block.location_version,
-                map_event_id=event.event_id,
-            )
-            self._execution_mapping_generations[binding.binding_id] = mapping_generation
-            binding.transition(BindingState.REQUIRED)
+        with self._committed_runtime_apply("publish_waiter_mappings"):
+            events_by_operation = {event.operation_id: event for event in events}
+            for binding, mapping_id, mapping_generation in pending:
+                if binding.execution_ref is None:
+                    raise StateTransitionError("request waiter lost execution identity")
+                self._execution_mappings[binding.execution_ref] = ExecutionMapping(
+                    mapping_id=mapping_id,
+                    execution_ref=binding.execution_ref,
+                    binding_id=binding.binding_id,
+                    block_key=binding.block_key,
+                    gpu_replica=gpu.replica_id,
+                    location_version=block.location_version,
+                    map_event_id=events_by_operation[mapping_id].event_id,
+                )
+                self._execution_mapping_generations[binding.binding_id] = (
+                    mapping_generation
+                )
+                binding.transition(BindingState.REQUIRED)
 
     def _schedule_transfer(
         self,
@@ -2172,63 +2655,111 @@ class LifecycleOrchestrator:
         if transfer_id in self._transfers:
             raise IdentityError(f"transfer ID already used: {transfer_id}")
         self._validate_new_slot(target_replica)
-        events = self._ledger.append_batch(
-            (
-                self._allocation_draft(
-                    block.block_key,
-                    target_replica,
-                    byte_capacity=source.byte_capacity,
-                    payload_size=source.payload_size,
-                    payload_digest=source.payload_digest,
+        drafts = [
+            self._allocation_draft(
+                block.block_key,
+                target_replica,
+                byte_capacity=source.byte_capacity,
+                payload_size=source.payload_size,
+                payload_digest=source.payload_digest,
+                timestamp_ns=timestamp_ns,
+                reason="transfer_target_reservation",
+                local_id="target-allocation",
+            ),
+            EventDraft(
+                action=action,
+                status=LedgerStatus.SCHEDULED,
+                reason=reason,
+                timestamp_ns=timestamp_ns,
+                operation_id=transfer_id,
+                local_id="transfer-scheduled",
+                parent_local_id="target-allocation",
+                block_key=block.block_key,
+                blocks=(target_replica,),
+                transfer_id=transfer_id,
+                source_tier=source.replica_id.tier,
+                target_tier=target_replica.tier,
+                byte_count=source.payload_size,
+                payload_digest=source.payload_digest,
+                waiter_binding_ids_after=(),
+            ),
+        ]
+        waiter_ids: set[str] = set()
+        for binding in sorted(waiter_bindings, key=lambda item: item.binding_id):
+            drafts.append(
+                self._binding_state_draft(
+                    binding,
+                    BindingState.WAITING,
                     timestamp_ns=timestamp_ns,
-                    reason="transfer_target_reservation",
-                    local_id="target-allocation",
-                ),
+                    reason="h2d_waiter_prepared",
+                )
+            )
+            waiter_ids.add(binding.binding_id)
+            drafts.append(
                 EventDraft(
-                    action=action,
-                    status=LedgerStatus.SCHEDULED,
-                    reason=reason,
+                    action=LedgerAction.WAITER_JOIN,
+                    status=LedgerStatus.COMPLETED,
+                    reason="h2d_waiter_joined",
                     timestamp_ns=timestamp_ns,
-                    operation_id=transfer_id,
-                    parent_local_id="target-allocation",
-                    block_key=block.block_key,
-                    blocks=(target_replica,),
+                    operation_id=(f"{transfer_id}:{binding.binding_id}:waiter_join"),
+                    parent_local_id="transfer-scheduled",
+                    workflow=binding.workflow,
+                    request_id=binding.request_id,
+                    node_id=binding.node_id,
+                    block_key=binding.block_key,
+                    binding_id=binding.binding_id,
+                    binding_kind=binding.kind,
                     transfer_id=transfer_id,
-                    source_tier=source.replica_id.tier,
-                    target_tier=target_replica.tier,
-                    byte_count=source.payload_size,
-                    payload_digest=source.payload_digest,
-                ),
+                    execution_ref=binding.execution_ref,
+                    waiter_binding_ids_after=tuple(sorted(waiter_ids)),
+                )
+            )
+        state_after = self._planned_block_state(
+            block,
+            inflight_transfer_id=transfer_id,
+            inflight_direction=direction,
+            reclaimed=False,
+        )
+        drafts.append(
+            self._block_state_draft(
+                block.block_key,
+                state_after,
+                timestamp_ns=timestamp_ns,
+                reason="transfer_scheduled_state",
             )
         )
-        reservation = ReplicaReservation(
-            replica_id=target_replica,
-            block_key=block.block_key,
-            byte_capacity=source.byte_capacity,
-            payload_size=source.payload_size,
-            payload_digest=source.payload_digest,
-            allocate_event_id=events[0].event_id,
-            transfer_id=transfer_id,
-        )
-        transfer = Transfer(
-            transfer_id=transfer_id,
-            direction=direction,
-            block_key=block.block_key,
-            source_replica=source.replica_id,
-            target_replica=target_replica,
-            declared_bytes=source.payload_size,
-            payload_digest=source.payload_digest,
-            started_ns=timestamp_ns,
-            scheduled_event_id=events[1].event_id,
-            ledger_action=action,
-            waiter_binding_ids={binding.binding_id for binding in waiter_bindings},
-        )
-        self._reservations[target_replica] = reservation
-        self._transfers[transfer_id] = transfer
-        self._transfer_waiter_history.update(transfer.waiter_binding_ids)
-        block.inflight_transfer_id = transfer_id
-        block.inflight_direction = direction
-        self._occupy_new_slot(target_replica)
+        events = self._ledger.append_batch(drafts)
+        with self._committed_runtime_apply("schedule_transfer"):
+            reservation = ReplicaReservation(
+                replica_id=target_replica,
+                block_key=block.block_key,
+                byte_capacity=source.byte_capacity,
+                payload_size=source.payload_size,
+                payload_digest=source.payload_digest,
+                allocate_event_id=events[0].event_id,
+                transfer_id=transfer_id,
+            )
+            transfer = Transfer(
+                transfer_id=transfer_id,
+                direction=direction,
+                block_key=block.block_key,
+                source_replica=source.replica_id,
+                target_replica=target_replica,
+                declared_bytes=source.payload_size,
+                payload_digest=source.payload_digest,
+                started_ns=timestamp_ns,
+                scheduled_event_id=events[1].event_id,
+                ledger_action=action,
+                waiter_binding_ids={binding.binding_id for binding in waiter_bindings},
+            )
+            self._reservations[target_replica] = reservation
+            self._transfers[transfer_id] = transfer
+            self._transfer_waiter_history.update(transfer.waiter_binding_ids)
+            block.inflight_transfer_id = transfer_id
+            block.inflight_direction = direction
+            self._occupy_new_slot(target_replica)
+            for binding in waiter_bindings:
+                self._prepare_waiter(binding)
         return self._transfer_command(transfer)
 
     @staticmethod
@@ -2322,6 +2853,15 @@ class LifecycleOrchestrator:
                 payload_digest=transfer.payload_digest,
             ),
         ]
+        for binding in inactive_waiters:
+            drafts.append(
+                self._binding_state_draft(
+                    binding,
+                    BindingState.RETAINED,
+                    timestamp_ns=timestamp_ns,
+                    reason="h2d_waiter_node_inactive",
+                )
+            )
         exec_pending: list[tuple[OwnerBinding, str, int]] = []
         for binding in waiter_bindings:
             mapping = self._mapping_for_binding(binding)
@@ -2345,52 +2885,80 @@ class LifecycleOrchestrator:
                     reason="h2d_waiter_published",
                 )
             )
-            exec_pending.append((binding, exec_mapping_id, mapping_generation))
-        events = self._ledger.append_batch(drafts)
-        transfer.terminate(
-            TransferState.COMPLETED,
-            timestamp_ns,
-            observed_bytes=observed_bytes,
-            observed_digest=observed_digest,
-        )
-        replica = ReplicaRecord(
-            replica_id=transfer.target_replica,
-            byte_capacity=reservation.byte_capacity,
-            payload_size=reservation.payload_size,
-            payload_digest=reservation.payload_digest,
-            allocate_event_id=reservation.allocate_event_id,
-            mapping_id=mapping_id,
-        )
-        block.replicas[transfer.target_replica.tier] = replica
-        if transfer.target_replica.tier == Tier.GPU:
-            block.location_version += 1
-        self._content_mappings[mapping_id] = ContentMapping(
-            mapping_id=mapping_id,
-            block_key=block.block_key,
-            replica_id=transfer.target_replica,
-            map_event_id=events[1].event_id,
-        )
-        self._reservations.pop(transfer.target_replica)
-        block.inflight_transfer_id = None
-        block.inflight_direction = None
-        for binding in inactive_waiters:
-            binding.transition(BindingState.RETAINED)
-        for event, (binding, exec_mapping_id, mapping_generation) in zip(
-            events[2:], exec_pending, strict=True
-        ):
-            if binding.execution_ref is None:
-                raise StateTransitionError("waiter lost execution identity")
-            self._execution_mappings[binding.execution_ref] = ExecutionMapping(
-                mapping_id=exec_mapping_id,
-                execution_ref=binding.execution_ref,
-                binding_id=binding.binding_id,
-                block_key=binding.block_key,
-                gpu_replica=transfer.target_replica,
-                location_version=block.location_version,
-                map_event_id=event.event_id,
+            drafts.append(
+                self._binding_state_draft(
+                    binding,
+                    BindingState.REQUIRED,
+                    timestamp_ns=timestamp_ns,
+                    reason="h2d_waiter_published",
+                )
             )
-            self._execution_mapping_generations[binding.binding_id] = mapping_generation
-            binding.transition(BindingState.REQUIRED)
+            exec_pending.append((binding, exec_mapping_id, mapping_generation))
+        final_replicas = {replica.replica_id for replica in block.replicas.values()}
+        final_replicas.add(transfer.target_replica)
+        location_version = block.location_version + int(
+            transfer.target_replica.tier == Tier.GPU
+        )
+        drafts.append(
+            self._block_state_draft(
+                block.block_key,
+                self._planned_block_state(
+                    block,
+                    replicas=final_replicas,
+                    location_version=location_version,
+                    reclaimed=False,
+                ),
+                timestamp_ns=timestamp_ns,
+                reason="transfer_completed_state",
+            )
+        )
+        events = self._ledger.append_batch(drafts)
+        with self._committed_runtime_apply("complete_transfer"):
+            transfer.terminate(
+                TransferState.COMPLETED,
+                timestamp_ns,
+                observed_bytes=observed_bytes,
+                observed_digest=observed_digest,
+            )
+            replica = ReplicaRecord(
+                replica_id=transfer.target_replica,
+                byte_capacity=reservation.byte_capacity,
+                payload_size=reservation.payload_size,
+                payload_digest=reservation.payload_digest,
+                allocate_event_id=reservation.allocate_event_id,
+                mapping_id=mapping_id,
+            )
+            block.replicas[transfer.target_replica.tier] = replica
+            if transfer.target_replica.tier == Tier.GPU:
+                block.location_version += 1
+            self._content_mappings[mapping_id] = ContentMapping(
+                mapping_id=mapping_id,
+                block_key=block.block_key,
+                replica_id=transfer.target_replica,
+                map_event_id=events[1].event_id,
+            )
+            self._reservations.pop(transfer.target_replica)
+            block.inflight_transfer_id = None
+            block.inflight_direction = None
+            for binding in inactive_waiters:
+                binding.transition(BindingState.RETAINED)
+            events_by_operation = {event.operation_id: event for event in events}
+            for binding, exec_mapping_id, mapping_generation in exec_pending:
+                if binding.execution_ref is None:
+                    raise StateTransitionError("waiter lost execution identity")
+                self._execution_mappings[binding.execution_ref] = ExecutionMapping(
+                    mapping_id=exec_mapping_id,
+                    execution_ref=binding.execution_ref,
+                    binding_id=binding.binding_id,
+                    block_key=binding.block_key,
+                    gpu_replica=transfer.target_replica,
+                    location_version=block.location_version,
+                    map_event_id=events_by_operation[exec_mapping_id].event_id,
+                )
+                self._execution_mapping_generations[binding.binding_id] = (
+                    mapping_generation
+                )
+                binding.transition(BindingState.REQUIRED)
 
     def _finalize_transfer_failure(
         self,
@@ -2408,40 +2976,62 @@ class LifecycleOrchestrator:
             TransferState.FAILED: LedgerStatus.FAILED,
             TransferState.CANCELLED: LedgerStatus.CANCELLED,
         }[state]
-        self._ledger.append_batch(
-            (
-                self._transfer_terminal_draft(
-                    transfer,
-                    status,
-                    timestamp_ns=timestamp_ns,
-                    observed_bytes=observed_bytes,
-                    observed_digest=observed_digest,
-                    reason=error,
-                    error=error,
-                ),
-                self._eviction_draft(
-                    block.block_key,
-                    reservation,
-                    timestamp_ns=timestamp_ns,
-                    reason=cleanup_reason,
-                ),
-            )
-        )
-        transfer.terminate(
-            state,
-            timestamp_ns,
-            observed_bytes=observed_bytes,
-            observed_digest=observed_digest,
-            error=error,
-        )
-        self._reservations.pop(transfer.target_replica)
-        self._free_slot(transfer.target_replica)
-        block.inflight_transfer_id = None
-        block.inflight_direction = None
-        for binding_id in transfer.waiter_binding_ids:
+        drafts = [
+            self._transfer_terminal_draft(
+                transfer,
+                status,
+                timestamp_ns=timestamp_ns,
+                observed_bytes=observed_bytes,
+                observed_digest=observed_digest,
+                reason=error,
+                error=error,
+            ),
+            self._eviction_draft(
+                block.block_key,
+                reservation,
+                timestamp_ns=timestamp_ns,
+                reason=cleanup_reason,
+            ),
+        ]
+        for binding_id in sorted(transfer.waiter_binding_ids):
             binding = self._bindings[binding_id]
             if binding.active and binding.state == BindingState.WAITING:
-                binding.transition(BindingState.RETAINED)
+                drafts.append(
+                    self._binding_state_draft(
+                        binding,
+                        BindingState.RETAINED,
+                        timestamp_ns=timestamp_ns,
+                        reason="h2d_transfer_terminal",
+                    )
+                )
+        drafts.append(
+            self._block_state_draft(
+                block.block_key,
+                self._planned_block_state(
+                    block,
+                    reclaimed=False,
+                ),
+                timestamp_ns=timestamp_ns,
+                reason="transfer_failed_state",
+            )
+        )
+        self._ledger.append_batch(drafts)
+        with self._committed_runtime_apply("terminate_transfer_failure"):
+            transfer.terminate(
+                state,
+                timestamp_ns,
+                observed_bytes=observed_bytes,
+                observed_digest=observed_digest,
+                error=error,
+            )
+            self._reservations.pop(transfer.target_replica)
+            self._free_slot(transfer.target_replica)
+            block.inflight_transfer_id = None
+            block.inflight_direction = None
+            for binding_id in transfer.waiter_binding_ids:
+                binding = self._bindings[binding_id]
+                if binding.active and binding.state == BindingState.WAITING:
+                    binding.transition(BindingState.RETAINED)
 
     @staticmethod
     def _transfer_terminal_draft(
@@ -2471,12 +3061,25 @@ class LifecycleOrchestrator:
             payload_digest=transfer.payload_digest,
             observed_digest=observed_digest,
             error=error,
+            waiter_binding_ids_after=tuple(sorted(transfer.waiter_binding_ids)),
         )
 
     def _remove_waiter(self, binding_id: str) -> None:
         for transfer in self._transfers.values():
             if transfer.active:
                 transfer.waiter_binding_ids.discard(binding_id)
+
+    def _active_waiter_transfer(self, binding_id: str) -> Transfer:
+        matches = [
+            transfer
+            for transfer in self._transfers.values()
+            if transfer.active and binding_id in transfer.waiter_binding_ids
+        ]
+        if len(matches) != 1:
+            raise StateTransitionError(
+                "waiting binding must belong to exactly one active transfer"
+            )
+        return matches[0]
 
     def _validate_terminal_timestamp(self, timestamp_ns: int) -> None:
         if timestamp_ns < self._ledger.last_timestamp_ns:
@@ -2488,6 +3091,7 @@ class LifecycleOrchestrator:
         *,
         timestamp_ns: int,
         reason: str,
+        waiter_sets: dict[str, set[str]] | None = None,
     ) -> _BindingReleasePlan:
         if not binding.active:
             raise StateTransitionError("cannot plan an inactive binding release")
@@ -2531,6 +3135,28 @@ class LifecycleOrchestrator:
                     reason=reason,
                 )
             )
+        if binding.state == BindingState.WAITING:
+            transfer = self._active_waiter_transfer(binding.binding_id)
+            if waiter_sets is None:
+                waiter_ids = set(transfer.waiter_binding_ids)
+            else:
+                waiter_ids = waiter_sets.setdefault(
+                    transfer.transfer_id,
+                    set(transfer.waiter_binding_ids),
+                )
+            if binding.binding_id not in waiter_ids:
+                raise StateTransitionError("waiting release lost its transfer edge")
+            waiter_ids.remove(binding.binding_id)
+            drafts.append(
+                self._waiter_draft(
+                    transfer,
+                    binding,
+                    LedgerAction.WAITER_LEAVE,
+                    waiter_ids,
+                    timestamp_ns=timestamp_ns,
+                    reason=reason,
+                )
+            )
         drafts.append(
             EventDraft(
                 action=LedgerAction.RELEASE,
@@ -2545,6 +3171,8 @@ class LifecycleOrchestrator:
                 block_key=binding.block_key,
                 binding_id=binding.binding_id,
                 binding_kind=binding.kind,
+                binding_state_before=binding.state,
+                binding_state_after=BindingState.RELEASED,
                 execution_ref=binding.execution_ref,
             )
         )
@@ -2596,17 +3224,20 @@ class LifecycleOrchestrator:
                 binding.binding_id,
             )
         )
+        waiter_sets: dict[str, set[str]] = {}
         plans = [
             self._plan_binding_release(
                 binding,
                 timestamp_ns=timestamp_ns,
                 reason="workflow_terminal",
+                waiter_sets=waiter_sets,
             )
             for binding in active
         ]
         self._ledger.append_batch(draft for plan in plans for draft in plan.drafts)
-        for plan in plans:
-            self._commit_binding_release(plan)
+        with self._committed_runtime_apply("release_workflow_bindings"):
+            for plan in plans:
+                self._commit_binding_release(plan)
 
     def _fail_workflow_locked(
         self,
@@ -2668,34 +3299,37 @@ class LifecycleOrchestrator:
                 binding.binding_id,
             )
         )
+        waiter_sets: dict[str, set[str]] = {}
         plans = [
             self._plan_binding_release(
                 binding,
                 timestamp_ns=timestamp_ns,
                 reason="workflow_terminal",
+                waiter_sets=waiter_sets,
             )
             for binding in active
         ]
         release_drafts = [draft for plan in plans for draft in plan.drafts]
         self._ledger.append_batch((*release_drafts, *drafts))
-        if failed_node is not None:
-            failed_node.status = NodeStatus.FAILED
-            failed_node.terminal_ns = timestamp_ns
-            failed_node.error = error
-        for node in running:
-            node.status = NodeStatus.SKIPPED
-            node.terminal_ns = timestamp_ns
-            node.error = error
-        for node in record.nodes.values():
-            if node.status in {NodeStatus.PENDING, NodeStatus.READY}:
+        with self._committed_runtime_apply("fail_workflow"):
+            if failed_node is not None:
+                failed_node.status = NodeStatus.FAILED
+                failed_node.terminal_ns = timestamp_ns
+                failed_node.error = error
+            for node in running:
                 node.status = NodeStatus.SKIPPED
                 node.terminal_ns = timestamp_ns
                 node.error = error
-        for plan in plans:
-            self._commit_binding_release(plan)
-        record.status = WorkflowStatus.FAILED
-        record.terminal_ns = timestamp_ns
-        record.error = error
+            for node in record.nodes.values():
+                if node.status in {NodeStatus.PENDING, NodeStatus.READY}:
+                    node.status = NodeStatus.SKIPPED
+                    node.terminal_ns = timestamp_ns
+                    node.error = error
+            for plan in plans:
+                self._commit_binding_release(plan)
+            record.status = WorkflowStatus.FAILED
+            record.terminal_ns = timestamp_ns
+            record.error = error
 
     def _audit_workflows(
         self,

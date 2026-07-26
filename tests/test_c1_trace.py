@@ -292,6 +292,7 @@ def _trace(
                 disposition=ServiceDisposition.H2D_FAILED,
                 transfer_id="transfer-1",
                 transfer_scheduled_event_id="event-load-scheduled",
+                waiter_join_event_id="event-waiter-join",
                 transfer_terminal_event_id="event-load-failed",
                 waiter_binding_ids=("request-binding-1",),
             )
@@ -387,11 +388,11 @@ def test_predicted_trace_round_trip_and_reconstructs_resident_demand(
     assert reconstruct_demand_label(validated, "observation-1").epoch_count == 1
 
 
-def test_foundation_v1_trace_is_not_reinterpreted_as_v2(block_key: BlockKey) -> None:
+def test_schedule_v2_trace_is_not_reinterpreted_as_v3(block_key: BlockKey) -> None:
     header = _trace(block_key)[0]
     raw = encode_trace_record(header).replace(
+        b"dagkv.m3.c1_trace.v3",
         b"dagkv.m3.c1_trace.v2",
-        b"dagkv.m3.c1_trace.v1",
     )
 
     with pytest.raises(TraceValidationError, match="unsupported.*schema"):

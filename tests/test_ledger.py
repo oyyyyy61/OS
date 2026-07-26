@@ -9,16 +9,175 @@ import pytest
 
 from dagkv.domain import (
     BindingKind,
+    BindingState,
     BlockKey,
+    BlockStateSnapshot,
     ExecutionRef,
     LedgerAction,
     LedgerStatus,
     ReplicaId,
+    ResidencyState,
     StateTransitionError,
     Tier,
     WorkflowKey,
 )
 from dagkv.ledger import EventDraft, EventLedger
+
+
+def test_strict_ledger_rejects_a_standalone_allocation(
+    block_key: BlockKey,
+    digest: Callable[[str], str],
+) -> None:
+    """A formal batch cannot expose an unbound private allocation."""
+
+    ledger = EventLedger(
+        run_id="run",
+        phase="test",
+        source="pytest",
+        require_complete_state=True,
+    )
+    with pytest.raises(StateTransitionError, match="block snapshot"):
+        ledger.append(
+            EventDraft(
+                action=LedgerAction.ALLOCATE,
+                status=LedgerStatus.COMPLETED,
+                reason="orphan target",
+                timestamp_ns=1,
+                operation_id="orphan-allocation",
+                block_key=block_key,
+                blocks=(ReplicaId(Tier.GPU, "cuda:0", "slot", 1),),
+                payload_size=32,
+                byte_count=64,
+                payload_digest=digest("payload"),
+            )
+        )
+    assert ledger.events == ()
+
+
+def test_strict_ledger_rejects_a_snapshot_without_same_batch_cause(
+    block_key: BlockKey,
+    digest: Callable[[str], str],
+) -> None:
+    ledger = EventLedger(
+        run_id="run",
+        phase="test",
+        source="pytest",
+        require_complete_state=True,
+    )
+    gpu = ReplicaId(Tier.GPU, "cuda:0", "slot", 1)
+    payload_digest = digest("payload")
+    allocated, mapped, _ = ledger.append_batch(
+        (
+            EventDraft(
+                action=LedgerAction.ALLOCATE,
+                status=LedgerStatus.COMPLETED,
+                reason="allocate",
+                timestamp_ns=1,
+                operation_id="gpu-allocation",
+                local_id="allocation",
+                block_key=block_key,
+                blocks=(gpu,),
+                payload_size=32,
+                byte_count=64,
+                payload_digest=payload_digest,
+            ),
+            EventDraft(
+                action=LedgerAction.MAP,
+                status=LedgerStatus.COMPLETED,
+                reason="publish",
+                timestamp_ns=1,
+                operation_id="gpu-map",
+                parent_local_id="allocation",
+                block_key=block_key,
+                blocks=(gpu,),
+                mapping_id="gpu-map",
+                payload_size=32,
+                payload_digest=payload_digest,
+            ),
+            EventDraft(
+                action=LedgerAction.BLOCK_STATE,
+                status=LedgerStatus.COMPLETED,
+                reason="gpu-state",
+                timestamp_ns=1,
+                operation_id="gpu-state",
+                block_key=block_key,
+                block_state_after=BlockStateSnapshot(
+                    location_version=1,
+                    residency=ResidencyState.GPU_ONLY,
+                    replicas=(gpu,),
+                    inflight_transfer_id=None,
+                    inflight_direction=None,
+                    reclaimed=False,
+                ),
+            ),
+        )
+    )
+    ledger.append_batch(
+        (
+            EventDraft(
+                action=LedgerAction.UNMAP,
+                status=LedgerStatus.COMPLETED,
+                reason="unmap",
+                timestamp_ns=2,
+                operation_id=mapped.operation_id,
+                parent_event_id=mapped.event_id,
+                block_key=block_key,
+                blocks=(gpu,),
+                mapping_id=mapped.mapping_id,
+                payload_size=32,
+                payload_digest=payload_digest,
+            ),
+            EventDraft(
+                action=LedgerAction.EVICT,
+                status=LedgerStatus.COMPLETED,
+                reason="evict",
+                timestamp_ns=2,
+                operation_id=allocated.operation_id,
+                parent_event_id=allocated.event_id,
+                block_key=block_key,
+                blocks=(gpu,),
+                payload_size=32,
+                byte_count=64,
+                payload_digest=payload_digest,
+            ),
+            EventDraft(
+                action=LedgerAction.BLOCK_STATE,
+                status=LedgerStatus.COMPLETED,
+                reason="absent-state",
+                timestamp_ns=2,
+                operation_id="absent-state",
+                block_key=block_key,
+                block_state_after=BlockStateSnapshot(
+                    location_version=2,
+                    residency=ResidencyState.ABSENT,
+                    replicas=(),
+                    inflight_transfer_id=None,
+                    inflight_direction=None,
+                    reclaimed=False,
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(StateTransitionError, match="same-batch physical state change"):
+        ledger.append(
+            EventDraft(
+                action=LedgerAction.BLOCK_STATE,
+                status=LedgerStatus.COMPLETED,
+                reason="forged-reclaim",
+                timestamp_ns=3,
+                operation_id="forged-reclaim",
+                block_key=block_key,
+                block_state_after=BlockStateSnapshot(
+                    location_version=3,
+                    residency=ResidencyState.FREED,
+                    replicas=(),
+                    inflight_transfer_id=None,
+                    inflight_direction=None,
+                    reclaimed=True,
+                ),
+            )
+        )
 
 
 def test_invalid_batch_rolls_back_all_rows() -> None:
@@ -200,6 +359,7 @@ def test_transfer_terminal_cannot_change_frozen_geometry(
             target_tier=cpu.tier,
             byte_count=32,
             payload_digest=payload_a,
+            waiter_binding_ids_after=(),
         )
     )
     with pytest.raises(StateTransitionError, match="geometry changed"):
@@ -220,9 +380,218 @@ def test_transfer_terminal_cannot_change_frozen_geometry(
                 observed_byte_count=1,
                 payload_digest=payload_b,
                 observed_digest=payload_b,
+                waiter_binding_ids_after=(),
             )
         )
     assert len(ledger.events) == 4
+
+
+def test_h2d_terminal_requires_live_waiting_waiters(
+    block_key: BlockKey,
+    digest: Callable[[str], str],
+) -> None:
+    ledger = EventLedger(run_id="run", phase="test", source="pytest")
+    workflow = WorkflowKey("workflow", 0)
+    execution = ExecutionRef(workflow, "request", "sequence", 0)
+    cpu = ReplicaId(Tier.CPU, "numa:0", "slot", 1)
+    gpu = ReplicaId(Tier.GPU, "cuda:0", "slot", 1)
+    payload_digest = digest("payload")
+    cpu_allocation = ledger.append(
+        EventDraft(
+            action=LedgerAction.ALLOCATE,
+            status=LedgerStatus.COMPLETED,
+            reason="cpu allocation",
+            timestamp_ns=1,
+            operation_id="cpu-allocation",
+            block_key=block_key,
+            blocks=(cpu,),
+            payload_size=32,
+            byte_count=64,
+            payload_digest=payload_digest,
+        )
+    )
+    ledger.append(
+        EventDraft(
+            action=LedgerAction.MAP,
+            status=LedgerStatus.COMPLETED,
+            reason="cpu publish",
+            timestamp_ns=1,
+            operation_id="cpu-map",
+            parent_event_id=cpu_allocation.event_id,
+            block_key=block_key,
+            blocks=(cpu,),
+            mapping_id="cpu-map",
+            payload_size=32,
+            payload_digest=payload_digest,
+        )
+    )
+    binding = ledger.append(
+        EventDraft(
+            action=LedgerAction.BIND,
+            status=LedgerStatus.COMPLETED,
+            reason="request retained",
+            timestamp_ns=2,
+            operation_id="request-binding",
+            workflow=workflow,
+            request_id="request",
+            node_id="agent",
+            block_key=block_key,
+            binding_id="request-binding",
+            binding_kind=BindingKind.REQUEST,
+            binding_state_after=BindingState.RETAINED,
+            execution_ref=execution,
+        )
+    )
+    gpu_allocation = ledger.append(
+        EventDraft(
+            action=LedgerAction.ALLOCATE,
+            status=LedgerStatus.COMPLETED,
+            reason="gpu reservation",
+            timestamp_ns=3,
+            operation_id="gpu-allocation",
+            block_key=block_key,
+            blocks=(gpu,),
+            payload_size=32,
+            byte_count=64,
+            payload_digest=payload_digest,
+        )
+    )
+    scheduled = ledger.append(
+        EventDraft(
+            action=LedgerAction.LOAD,
+            status=LedgerStatus.SCHEDULED,
+            reason="load",
+            timestamp_ns=3,
+            operation_id="load",
+            parent_event_id=gpu_allocation.event_id,
+            block_key=block_key,
+            blocks=(gpu,),
+            transfer_id="load",
+            source_tier=Tier.CPU,
+            target_tier=Tier.GPU,
+            byte_count=32,
+            payload_digest=payload_digest,
+            waiter_binding_ids_after=(),
+        )
+    )
+    ledger.append_batch(
+        (
+            EventDraft(
+                action=LedgerAction.BIND_STATE,
+                status=LedgerStatus.COMPLETED,
+                reason="wait",
+                timestamp_ns=3,
+                operation_id="request-binding",
+                parent_event_id=binding.event_id,
+                workflow=workflow,
+                request_id="request",
+                node_id="agent",
+                block_key=block_key,
+                binding_id="request-binding",
+                binding_kind=BindingKind.REQUEST,
+                binding_state_before=BindingState.RETAINED,
+                binding_state_after=BindingState.WAITING,
+                execution_ref=execution,
+            ),
+            EventDraft(
+                action=LedgerAction.WAITER_JOIN,
+                status=LedgerStatus.COMPLETED,
+                reason="join",
+                timestamp_ns=3,
+                operation_id="load:request-binding:join",
+                parent_event_id=scheduled.event_id,
+                workflow=workflow,
+                request_id="request",
+                node_id="agent",
+                block_key=block_key,
+                binding_id="request-binding",
+                binding_kind=BindingKind.REQUEST,
+                transfer_id="load",
+                execution_ref=execution,
+                waiter_binding_ids_after=("request-binding",),
+            ),
+        )
+    )
+    retained = EventDraft(
+        action=LedgerAction.BIND_STATE,
+        status=LedgerStatus.COMPLETED,
+        reason="detach",
+        timestamp_ns=4,
+        operation_id="request-binding",
+        parent_event_id=binding.event_id,
+        workflow=workflow,
+        request_id="request",
+        node_id="agent",
+        block_key=block_key,
+        binding_id="request-binding",
+        binding_kind=BindingKind.REQUEST,
+        binding_state_before=BindingState.WAITING,
+        binding_state_after=BindingState.RETAINED,
+        execution_ref=execution,
+    )
+    terminal = EventDraft(
+        action=LedgerAction.LOAD,
+        status=LedgerStatus.FAILED,
+        reason="DMA failed",
+        timestamp_ns=4,
+        operation_id="load",
+        parent_event_id=scheduled.event_id,
+        block_key=block_key,
+        blocks=(gpu,),
+        transfer_id="load",
+        source_tier=Tier.CPU,
+        target_tier=Tier.GPU,
+        byte_count=32,
+        observed_byte_count=0,
+        payload_digest=payload_digest,
+        error="DMA failed",
+        waiter_binding_ids_after=("request-binding",),
+    )
+    event_count = len(ledger.events)
+    with pytest.raises(StateTransitionError, match="terminal waiter.*not waiting"):
+        ledger.append_batch((retained, terminal))
+    with pytest.raises(StateTransitionError, match="active transfer"):
+        ledger.append(
+            EventDraft(
+                action=LedgerAction.RELEASE,
+                status=LedgerStatus.COMPLETED,
+                reason="forged early release",
+                timestamp_ns=4,
+                operation_id="request-binding",
+                parent_event_id=binding.event_id,
+                workflow=workflow,
+                request_id="request",
+                node_id="agent",
+                block_key=block_key,
+                binding_id="request-binding",
+                binding_kind=BindingKind.REQUEST,
+                binding_state_before=BindingState.WAITING,
+                binding_state_after=BindingState.RELEASED,
+                execution_ref=execution,
+            )
+        )
+    assert len(ledger.events) == event_count
+
+    ledger.append_batch((terminal, retained))
+    ledger.append(
+        EventDraft(
+            action=LedgerAction.RELEASE,
+            status=LedgerStatus.COMPLETED,
+            reason="release after terminal",
+            timestamp_ns=5,
+            operation_id="request-binding",
+            parent_event_id=binding.event_id,
+            workflow=workflow,
+            request_id="request",
+            node_id="agent",
+            block_key=block_key,
+            binding_id="request-binding",
+            binding_kind=BindingKind.REQUEST,
+            binding_state_before=BindingState.RETAINED,
+            binding_state_after=BindingState.RELEASED,
+            execution_ref=execution,
+        )
+    )
 
 
 def test_binding_parent_freezes_execution_identity(
@@ -279,6 +648,7 @@ def test_binding_parent_freezes_execution_identity(
             block_key=block_key,
             binding_id="binding",
             binding_kind=BindingKind.REQUEST,
+            binding_state_after=BindingState.REQUIRED,
             execution_ref=ref_a,
         )
     )
@@ -361,6 +731,8 @@ def test_binding_parent_freezes_execution_identity(
                 block_key=block_key,
                 binding_id="binding",
                 binding_kind=BindingKind.REQUEST,
+                binding_state_before=BindingState.REQUIRED,
+                binding_state_after=BindingState.RELEASED,
                 execution_ref=ref_a,
             )
         )
@@ -396,6 +768,7 @@ def test_binding_requires_a_live_content_location(block_key: BlockKey) -> None:
                 block_key=block_key,
                 binding_id="retention",
                 binding_kind=BindingKind.WORKFLOW_RETENTION,
+                binding_state_after=BindingState.RETAINED,
             )
         )
     assert ledger.events == ()
@@ -451,6 +824,7 @@ def test_lease_identity_cannot_reopen_and_audit_detects_tampering(
             block_key=block_key,
             binding_id="retention",
             binding_kind=BindingKind.WORKFLOW_RETENTION,
+            binding_state_after=BindingState.RETAINED,
         )
     )
 
@@ -576,6 +950,7 @@ def test_cross_family_references_block_early_free_and_failed_publish(
             block_key=block_key,
             binding_id="retention",
             binding_kind=BindingKind.WORKFLOW_RETENTION,
+            binding_state_after=BindingState.RETAINED,
         )
     )
     early_unmap = EventDraft(
@@ -607,6 +982,8 @@ def test_cross_family_references_block_early_free_and_failed_publish(
             block_key=block_key,
             binding_id="retention",
             binding_kind=BindingKind.WORKFLOW_RETENTION,
+            binding_state_before=BindingState.RETAINED,
+            binding_state_after=BindingState.RELEASED,
         )
     )
 
@@ -643,6 +1020,7 @@ def test_cross_family_references_block_early_free_and_failed_publish(
             target_tier=Tier.CPU,
             byte_count=32,
             payload_digest=payload_digest,
+            waiter_binding_ids_after=(),
         )
     )
     ledger.append(
@@ -661,6 +1039,7 @@ def test_cross_family_references_block_early_free_and_failed_publish(
             byte_count=32,
             payload_digest=payload_digest,
             error="DMA failure",
+            waiter_binding_ids_after=(),
         )
     )
     with pytest.raises(StateTransitionError, match="cannot publish content"):
@@ -783,6 +1162,7 @@ def test_cpu_only_gpu_reentry_requires_completed_h2d(
             target_tier=Tier.CPU,
             byte_count=32,
             payload_digest=payload_digest,
+            waiter_binding_ids_after=(),
         )
     )
     ledger.append(
@@ -802,6 +1182,7 @@ def test_cpu_only_gpu_reentry_requires_completed_h2d(
             observed_byte_count=32,
             payload_digest=payload_digest,
             observed_digest=payload_digest,
+            waiter_binding_ids_after=(),
         )
     )
     ledger.append(
@@ -895,6 +1276,7 @@ def test_cpu_only_gpu_reentry_requires_completed_h2d(
             target_tier=Tier.GPU,
             byte_count=32,
             payload_digest=payload_digest,
+            waiter_binding_ids_after=(),
         )
     )
     ledger.append(
@@ -914,6 +1296,7 @@ def test_cpu_only_gpu_reentry_requires_completed_h2d(
             observed_byte_count=32,
             payload_digest=payload_digest,
             observed_digest=payload_digest,
+            waiter_binding_ids_after=(),
         )
     )
     ledger.append(replace(gpu_v2_map, timestamp_ns=7))

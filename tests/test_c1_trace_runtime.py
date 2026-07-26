@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
-from threading import Event
+from threading import Event, get_ident
 
 import pytest
 
@@ -233,11 +233,79 @@ def test_cutoff_holds_runtime_lock_and_binds_exact_prefix(
 
     assert view.owner_specs == (workflow,)
     assert view.snapshot.runtime_event_count == len(view.lifecycle_prefix)
-    assert view.lifecycle_prefix[-1].event_id == "evt-000000000004"
+    assert view.lifecycle_prefix[-1].event_id == "evt-000000000005"
     assert receipt.event_count == len(view.lifecycle_prefix)
     assert post_commit_events[: len(view.lifecycle_prefix)] == view.lifecycle_prefix
     final_events = runtime.events
     assert final_events == view.lifecycle_prefix
+
+
+def test_lifecycle_seal_wins_cutoff_lock_race_before_durable_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    block_key: BlockKey,
+    digest: Callable[[str], str],
+) -> None:
+    runtime, _, _, _, _ = _runtime_with_retained_waiter(
+        block_key,
+        digest,
+        trace_required=True,
+    )
+    committer = _CutoffCommitter()
+    outer_guard_passed = Event()
+    main_thread_id = get_ident()
+    original_guard = runtime._guard_runtime_mutation
+
+    def observed_guard() -> None:
+        original_guard()
+        if get_ident() != main_thread_id and not outer_guard_passed.is_set():
+            outer_guard_passed.set()
+
+    monkeypatch.setattr(runtime, "_guard_runtime_mutation", observed_guard)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with runtime._lock:
+            future = pool.submit(
+                runtime.commit_shared_lease_cutoff,
+                block_key,
+                cutoff_ns=10,
+                horizon_duration_ns=20,
+                committer=committer,
+            )
+            assert outer_guard_passed.wait(timeout=2)
+            runtime.seal_lifecycle()
+
+        with pytest.raises(StateTransitionError, match="lifecycle stream is sealed"):
+            future.result()
+    assert committer.views == []
+
+
+def test_lifecycle_seal_wins_workflow_registration_lock_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = LifecycleOrchestrator(run_id="seal-registration-race")
+    workflow = WorkflowSpec(
+        WorkflowKey("late-workflow", 0),
+        (WorkflowNode("agent"),),
+    )
+    outer_guard_passed = Event()
+    main_thread_id = get_ident()
+    original_guard = runtime._guard_runtime_mutation
+
+    def observed_guard() -> None:
+        original_guard()
+        if get_ident() != main_thread_id and not outer_guard_passed.is_set():
+            outer_guard_passed.set()
+
+    monkeypatch.setattr(runtime, "_guard_runtime_mutation", observed_guard)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with runtime._lock:
+            future = pool.submit(runtime.register_workflow, workflow)
+            assert outer_guard_passed.wait(timeout=2)
+            runtime.seal_lifecycle()
+
+        with pytest.raises(StateTransitionError, match="lifecycle stream is sealed"):
+            future.result()
+    with pytest.raises(IdentityError, match="unknown workflow"):
+        runtime.workflow_snapshot(workflow.key)
 
 
 def test_cutoff_callback_failure_preserves_runtime(
@@ -517,6 +585,9 @@ def test_h2d_demand_is_durable_before_transfer_schedule(
     assert [event.action for event in runtime.events[before_count:]] == [
         LedgerAction.ALLOCATE,
         LedgerAction.LOAD,
+        LedgerAction.BIND_STATE,
+        LedgerAction.WAITER_JOIN,
+        LedgerAction.BLOCK_STATE,
     ]
     assert runtime.binding_snapshot(request).state == BindingState.WAITING
 
@@ -555,6 +626,41 @@ def test_resident_mapping_replay_does_not_create_a_second_demand(
     )
     assert len(committer.views) == 1
     assert runtime.events == committed_events
+
+
+def test_dispatched_resident_demand_cannot_publish_a_second_service(
+    block_key: BlockKey,
+    digest: Callable[[str], str],
+) -> None:
+    runtime, _, _, request, gpu = _runtime_with_retained_waiter(
+        block_key,
+        digest,
+        trace_required=True,
+    )
+    committer = _DemandCommitter(runtime)
+    runtime.ensure_h2d(
+        block_key,
+        gpu,
+        (request,),
+        transfer_id="resident-demand",
+        timestamp_ns=5,
+        demand_commit_id="resident-demand-1",
+        demand_committer=committer,
+    )
+    runtime.set_binding_state(request, BindingState.RETAINED, timestamp_ns=5)
+    before_events = runtime.events
+
+    with pytest.raises(StateTransitionError, match="second resident service"):
+        runtime.ensure_h2d(
+            block_key,
+            gpu,
+            (request,),
+            transfer_id="resident-demand-replay",
+            timestamp_ns=5,
+            demand_commit_id="resident-demand-1",
+        )
+    assert runtime.events == before_events
+    assert len(committer.views) == 1
 
 
 def test_same_demand_id_replay_is_independent_of_waiter_order(
@@ -733,7 +839,7 @@ def test_existing_single_flight_waiter_replay_does_not_create_a_second_demand(
     assert runtime.events == committed_events
 
 
-def test_failed_h2d_retry_reuses_the_original_demand_commit(
+def test_failed_h2d_physical_retry_requires_an_attempt_chain_schema(
     block_key: BlockKey,
     digest: Callable[[str], str],
 ) -> None:
@@ -772,17 +878,15 @@ def test_failed_h2d_retry_reuses_the_original_demand_commit(
         error="injected worker failure",
     )
 
-    retry = runtime.ensure_h2d(
-        block_key,
-        ReplicaId(Tier.GPU, "cuda:0", "slot-0", 3),
-        (request,),
-        transfer_id="load-for-c1-retry",
-        timestamp_ns=10,
-        demand_commit_id="h2d-demand-1",
-    )
-
-    assert retry is not None
-    assert retry.transfer_id == "load-for-c1-retry"
+    with pytest.raises(IdentityError, match="another logical demand"):
+        runtime.ensure_h2d(
+            block_key,
+            ReplicaId(Tier.GPU, "cuda:0", "slot-0", 3),
+            (request,),
+            transfer_id="load-for-c1-retry",
+            timestamp_ns=10,
+            demand_commit_id="h2d-demand-1",
+        )
     assert len(committer.views) == 1
 
 

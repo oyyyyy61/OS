@@ -474,6 +474,116 @@ def test_invalid_waiter_cannot_leave_half_scheduled_h2d(
     assert runtime.audit(require_quiescent=True).passed
 
 
+def test_audit_reconciles_exact_block_state_with_ledger(
+    block_key: BlockKey,
+    digest: Callable[[str], str],
+) -> None:
+    """Equal resource counts cannot hide an unrecorded block-state mutation."""
+
+    runtime = LifecycleOrchestrator(run_id="block-state-reconciliation")
+    runtime.register_gpu_block(
+        block_key,
+        ReplicaId(Tier.GPU, "cuda:0", "slot", 1),
+        byte_capacity=1024,
+        payload_size=1024,
+        payload_digest=digest("payload"),
+        timestamp_ns=1,
+    )
+    assert runtime.audit().passed
+
+    # Fault injection models a state mutation that bypassed the sole writer.
+    runtime._blocks[block_key].location_version += 1
+    report = runtime.audit()
+    assert not report.passed
+    assert "block state ledger/runtime mismatch" in report.issues
+
+
+def test_audit_reconciles_terminal_transfer_history(
+    block_key: BlockKey,
+    digest: Callable[[str], str],
+) -> None:
+    runtime = LifecycleOrchestrator(run_id="transfer-history-reconciliation")
+    runtime.register_gpu_block(
+        block_key,
+        ReplicaId(Tier.GPU, "cuda:0", "slot", 1),
+        byte_capacity=1024,
+        payload_size=1024,
+        payload_digest=digest("payload"),
+        timestamp_ns=1,
+    )
+    command = runtime.begin_d2h(
+        block_key,
+        ReplicaId(Tier.CPU, "numa:0", "slot", 1),
+        transfer_id="failed-save",
+        timestamp_ns=2,
+    )
+    assert command is not None
+    runtime.fail_transfer(
+        command.transfer_id,
+        timestamp_ns=3,
+        observed_bytes=0,
+        observed_digest=None,
+        error="DMA failed",
+    )
+    assert runtime.audit().passed
+
+    runtime._transfers[command.transfer_id].error = "tampered terminal"
+    report = runtime.audit()
+    assert not report.passed
+    assert (
+        f"transfer history ledger/runtime mismatch: {command.transfer_id}"
+        in report.issues
+    )
+
+
+@pytest.mark.parametrize("exception_type", (RuntimeError, KeyboardInterrupt))
+def test_post_ledger_apply_failure_permanently_poisons_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    block_key: BlockKey,
+    digest: Callable[[str], str],
+    exception_type: type[BaseException],
+) -> None:
+    runtime = LifecycleOrchestrator(run_id="post-commit-poison")
+    runtime.register_gpu_block(
+        block_key,
+        ReplicaId(Tier.GPU, "cuda:0", "slot", 1),
+        byte_capacity=1024,
+        payload_size=1024,
+        payload_digest=digest("payload"),
+        timestamp_ns=1,
+    )
+    command = runtime.begin_d2h(
+        block_key,
+        ReplicaId(Tier.CPU, "numa:0", "slot", 1),
+        transfer_id="poisoned-save",
+        timestamp_ns=2,
+    )
+    assert command is not None
+
+    def fail_slot_release(_replica: ReplicaId) -> None:
+        raise exception_type("injected apply failure")
+
+    monkeypatch.setattr(runtime, "_free_slot", fail_slot_release)
+    with pytest.raises(exception_type, match="injected apply failure"):
+        runtime.fail_transfer(
+            command.transfer_id,
+            timestamp_ns=3,
+            observed_bytes=0,
+            observed_digest=None,
+            error="DMA failed",
+        )
+
+    report = runtime.audit()
+    assert not report.passed
+    assert any("post-ledger runtime apply failed" in issue for issue in report.issues)
+    with pytest.raises(StateTransitionError, match="runtime is poisoned"):
+        runtime.register_workflow(
+            WorkflowSpec(WorkflowKey("after-poison", 0), (WorkflowNode("node"),))
+        )
+    with pytest.raises(StateTransitionError, match="runtime is poisoned"):
+        runtime.seal_lifecycle()
+
+
 def test_early_workflow_failure_does_not_partially_mutate_state(
     block_key: BlockKey,
     digest: Callable[[str], str],

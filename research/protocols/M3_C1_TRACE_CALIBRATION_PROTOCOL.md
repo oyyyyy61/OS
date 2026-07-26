@@ -1,4 +1,4 @@
-# M3/C1-B Trace And Calibration Protocol v2
+# M3/C1-B Trace And Calibration Protocol v3
 
 ## Material Passport
 
@@ -6,18 +6,19 @@
 - Origin mode: plan
 - Origin date: 2026-07-26
 - Pre-data amendment date: 2026-07-27
-- Verification status: `STRUCTURAL_PROTOCOL_V2_FROZEN`; numerical preregistration open
-- Version label: `m3_c1b_trace_calibration_v2`
-- Supersedes: v1 at Git commit
-  `887fc2e547eabdee987d6afbd474d78a86fff8ba`
+- Verification status: `STRUCTURAL_PROTOCOL_V3_FROZEN`; numerical preregistration open
+- Version label: `m3_c1b_trace_calibration_v3`
+- Supersedes: v2 at Git commit
+  `16c6ec6929fe45bf19b7d74b75470a6b757b6111`
 
 The Git commit that first contains this version is its structural freeze
 identity. Numerical thresholds require a separate post-pilot preregistration.
-V2 was amended before excluded-pilot or formal C1-B data collection because
-the first implementation audit found that v1 did not bind exact schedule
-checkpoint prefixes and conflated normalized schedule-event count with natural
-source EOF count. V1 remains an immutable historical protocol and cannot govern
-new traces or labels.
+V3 was amended before excluded-pilot or formal C1-B data collection because
+the second implementation audit found that lifecycle-event v1 omitted atomic
+batch boundaries, binding transitions, block after-state, and exact H2D waiter
+membership. V2 remains an immutable historical protocol and cannot govern new
+traces or labels. Its schedule-sidecar contract remains unchanged and is reused
+without reinterpretation.
 
 ## Status And Claim Boundary
 
@@ -111,7 +112,7 @@ measures and cannot increase the sample count.
 
 ## Trace Record Contract
 
-Schema `dagkv.m3.c1_trace.v2` is an append-only canonical JSONL stream. Every
+Schema `dagkv.m3.c1_trace.v3` is an append-only canonical JSONL stream. Every
 row has an exact closed field set containing `schema_version`, `record_type`,
 `trace_id`, `run_id`, `schedule_id`, `schedule_case_id`, `sequence`,
 `record_id`, `parent_record_id`, and a type-specific payload. Observation rows
@@ -138,7 +139,22 @@ serializes every `LifecycleEvent` in ledger-sequence order, including nested
 `WorkflowKey`, `BlockKey`, `ReplicaId`, and `ExecutionRef`, without replacing
 canonical block identity with a physical slot. Both headers bind one
 `trace_pair_id`; the create-only evidence manifest binds their final file
-digests without rewriting either stream.
+digests without rewriting either stream. Lifecycle-event v2 assigns every row
+an exact `batch_id`, zero-based index, and batch size. It records typed binding
+state, waiter join/leave, block-state transitions, and complete scheduled plus
+terminal transfer history. The sole writer closes the stream with one final
+`STREAM_SEAL` row timestamped from its monotonic clock. No event may follow it.
+The sidecar closure is derived from that row and binds the complete event count,
+last event and batch, closed-through timestamp, and canonical event-stream
+digest; a caller cannot supply an independent closure time. The verifier
+replays only complete batches, so a prefix ending inside a batch fails closed.
+
+`location_version` is the GPU execution-mapping ABA version. Publishing or
+removing a GPU replica, or entering `FREED`, increments it exactly once per
+atomic batch. D2H schedule/completion, CPU publication, H2D schedule/failure,
+and waiter-only changes leave it unchanged. Residency and the complete
+published-replica/inflight-transfer state are recorded separately, so this
+field must not be interpreted as a general residency revision.
 
 A separate canonical artifact with schema `dagkv.m3.schedule_sidecar.v1`
 binds one trace pair, run, source artifact, schedule, and schedule case before
@@ -185,11 +201,12 @@ that an eligible demand was not omitted, especially for a zero-demand label.
 Until that total normalizer is frozen and implemented, natural observations
 fail closed; the controlled replay path is the C1-B pilot/formal lane.
 
-Trace schema v2 supersedes the initial foundation-only v1 because checkpoint
-and prefix-digest watermark fields, zero-event checkpoint semantics, and the
-separate natural-source EOF fields are required and byte-incompatible. Existing
-v1 files retain their historical identity and are diagnostic only; they cannot
-be reinterpreted or admitted to a v2 label gate.
+Trace schema v3 supersedes v2 because every embedded lifecycle prefix now uses
+lifecycle-event v2 and must end at an exact atomic batch boundary. Trace v2 and
+lifecycle-event v1 files retain their historical identities and are diagnostic
+only; they cannot be reinterpreted or admitted to a v3 label gate. Trace v2 had
+already superseded foundation-only v1 for exact schedule checkpoint prefixes,
+zero-event checkpoint semantics, and separate natural-source EOF fields.
 
 The observation state machine is:
 
@@ -217,8 +234,10 @@ schedule are frozen and content addressed.
 
 The cutoff event count is the exclusive upper bound of the allowed lifecycle
 prefix. Its last event ID and timestamp must match the canonical ledger when
-the prefix is nonempty. The inline snapshot is authoritative; reconstructing a
-cutoff snapshot from a later workflow state is forbidden.
+the prefix is nonempty, and the final row must close its entire atomic batch.
+Detached lifecycle replay must reproduce the inline block state, active
+retention owners, and eligible nodes at that boundary. Reconstructing a cutoff
+snapshot from a later workflow state is forbidden.
 
 `SharedLeaseForecast.generated_ns` must equal `cutoff_ns`, and its absolute
 `horizon_ns` must equal `primary_deadline_ns`. The snapshot, lifecycle prefix,
@@ -264,10 +283,16 @@ epoch per observation.
 Service provenance binds exactly one of resident `EXEC_MAP`, successful H2D
 plus `EXEC_MAP`, failed/cancelled H2D, or request cancellation after the intent.
 Optional H2D provenance records the `LOAD` or `PREFETCH` transfer, terminal
-event, bytes, and actual coalesced waiter set. It describes how demand was
-served and never changes `Y_i_first` or `N_i`. The declared demand-epoch
-partition remains fixed even when the serving strategy coalesces a different
-waiter set.
+event, the exact `WAITER_JOIN` event for this request, bytes, and actual
+coalesced waiter set. The join may follow a transfer scheduled before the
+request's pre-service prefix, but it must follow the demand intent and preserve
+the request binding's original workflow, node, execution, and block lineage.
+It describes how demand was served and never changes `Y_i_first` or `N_i`.
+The declared demand-epoch partition remains fixed even when the serving
+strategy coalesces a different waiter set. V3 contains no physical-attempt
+chain: the same `demand_commit_id` permits only an event-free, exact replay of
+the already dispatched access batch. A later physical retry is invalid for a
+`COMPLETE` observation until a separately frozen attempt-chain schema exists.
 
 A proactive `PREFETCH` without an eligible request waiter emits no demand
 intent and cannot create a positive label. A later scheduled consumer emits its
@@ -509,7 +534,7 @@ Every selected value must be committed before a formal schedule is generated:
   zero-retry rules.
 
 Apart from the inferential error rates above, no numerical success threshold is
-frozen in this v1 protocol. Selecting any listed value from `FORMAL`, reusing
+frozen in this v3 protocol. Selecting any listed value from `FORMAL`, reusing
 pilot observations, or using the same rows for `CAL_FIT` and `CAL_RADIUS`
 invalidates the C1-B formal claim.
 
@@ -600,9 +625,12 @@ rule passes.
 The first C1-B foundation slice now implements the closed trace record model,
 canonical JSONL parser, structural state machine, content-addressed lifecycle
 and schedule evidence-gate interfaces, atomic cutoff view, and pre-service
-demand gate. A stable `demand_commit_id` distinguishes a retry of one scheduled
-access batch from a new resident or H2D demand; the adapter must pass only the
-new logical consumers introduced by that invocation.
+demand gate. A stable `demand_commit_id` distinguishes an idempotent replay of
+one scheduled access call from a new resident or H2D demand. Replay must
+preserve the original timestamp, action, GPU target, and waiter identities and
+cannot emit a second service event. The adapter must pass only the new logical
+consumers introduced by the first invocation. Physical retry chains remain
+outside v3.
 
 This checkpoint is not C1-B0 or C1-B1 acceptance. The concrete lifecycle
 sidecar verifier, schedule replay verifier, branch-grammar artifact validator,
@@ -620,8 +648,20 @@ create-only writer/loader, replay and natural-source closure types, exact
 checkpoint-prefix binding, and an independent demand-intent/reuse-epoch
 bijection verifier. Replay labels may pass this gate. Natural closure/source
 integrity is audited, while natural labels remain closed pending a total source
-normalizer. The lifecycle sidecar remains diagnostic until the event
-contract records atomic batch boundaries, block after-state/location version,
-binding state transitions, and exact H2D waiter membership. No lifecycle
-receipt for a complete formal observation may be issued from the older event
-schema.
+normalizer.
+
+The third foundation slice upgrades the lifecycle event contract to v2 and the
+containing trace contract to v3. It records exact atomic batch coordinates,
+typed binding transitions, H2D waiter join/leave after-sets, transfer-terminal
+waiter provenance, complete transfer history, and block boundary snapshots. A
+sole-writer `STREAM_SEAL` supplies the trusted closure timestamp. The canonical
+lifecycle sidecar uses create-only write/fsync/readback, stable single-link
+loading, detached ledger replay, cutoff/pre-service prefix checks, and exact
+resident/H2D/cancellation service reconstruction before issuing a lifecycle
+receipt. Lifecycle-event v1 and trace v2 cannot issue that receipt.
+
+This checkpoint still does not accept C1-B0. The operation-typed durable trace
+committer, segmented bundle-level evidence seal, branch-grammar validator, and
+split/leakage gates remain open. The bundle-level seal is distinct from the
+implemented lifecycle stream seal. No pilot or formal probability result has
+been collected under v3.

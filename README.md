@@ -80,6 +80,13 @@ C1-B trace and calibration work is governed by
 demand intent separately from resident/H2D service outcomes, freezes
 connected-component and temporal split rules, and reserves all numerical
 calibration thresholds for an excluded pilot before formal preregistration.
+The current pre-data v3 trace contract includes lifecycle-event v2, exact
+atomic batch coordinates, binding and H2D waiter transitions, block boundary
+snapshots, full transfer-history reconciliation, a sole-writer lifecycle stream
+seal, and a create-only lifecycle sidecar with independent replay. C1-B0
+remains open until the operation-typed durable trace committer and segmented
+final evidence seal are implemented and tested; that bundle-level seal is
+separate from the implemented lifecycle stream seal.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint
