@@ -94,9 +94,9 @@ The normative C1 boundary and later experiment gates are frozen in
   count;
 - represents mutually exclusive and correlated outcomes jointly and permits
   multiplication only across declared-independent groups;
-- deduplicates concurrent fanout into one physical reuse epoch;
-- separates first physical re-admission probability, expected unique epochs,
-  and expected repeats;
+- deduplicates concurrent fanout into one reference demand epoch;
+- separates first physical reuse-demand probability, expected unique epochs,
+  and expected repeats; actual readmission remains a later policy outcome;
 - computes exact PPM nominal values and sound total-variation drift bounds;
 - rejects stale, cross-owner, ineligible-node, identity-drift, invalid-mass,
   and online-oracle inputs;
@@ -112,6 +112,14 @@ the external evidence identities are frozen in
 C1-C paired policy replay, and C1-D real-GPU gates remain open. No C1
 performance or novelty claim is authorized.
 
+C1-B now follows the structurally frozen data boundary in
+`research/protocols/M3_C1_TRACE_CALIBRATION_PROTOCOL.md`: the probability label
+comes from pre-policy demand intents under a frozen exogenous schedule, split
+roles are connected components ordered as pilot/train/cal-fit/cal-radius/formal,
+actual H2D is reserved for later policy evaluation, and every numerical
+success threshold apart from the frozen inferential error rates remains open
+until an excluded pilot is complete.
+
 M3 must additionally implement an explicitly derived capacity/DMA-constrained
 joint controller (C2) and deadline-aware partial-prefix single-flight (C3).
 Each mechanism requires an independent switch, matched first-order baselines,
@@ -119,7 +127,11 @@ and fault tests.
 
 ## M4-M6
 
-- **M4:** trace provenance, field audit, split policy, and leakage review.
-- **M5:** preregistered paired matrix with immutable schedules and raw outputs.
+- **M4:** C1-B0 through C1-B4: trace/branch grammar, atomic cutoff and demand
+  instrumentation, schedule watermark, provenance, split/leakage audit,
+  disjoint train/cal-fit/cal-radius artifacts, and preregistered chronological
+  formal coverage plus sharpness.
+- **M5:** C1-C/C1-D preregistered paired policy matrix with immutable schedules,
+  raw CPU replay, and real-GPU outputs.
 - **M6:** claim-to-evidence audit, paper tables, artifact reconstruction, and
   reviewer-style falsification review.

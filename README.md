@@ -75,6 +75,12 @@ closed. The separately published aggregate decision passed a fresh full replay,
 so M2 correctness is accepted; every performance and M3 policy claim remains
 open.
 
+C1-B trace and calibration work is governed by
+`research/protocols/M3_C1_TRACE_CALIBRATION_PROTOCOL.md`. It records pre-policy
+demand intent separately from resident/H2D service outcomes, freezes
+connected-component and temporal split rules, and reserves all numerical
+calibration thresholds for an excluded pilot before formal preregistration.
+
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint
 controller (C2), and deadline-aware partial-prefix single-flight (C3).

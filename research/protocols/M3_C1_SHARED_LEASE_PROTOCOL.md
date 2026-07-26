@@ -41,21 +41,21 @@ The exact local sources and hashes are frozen in `research/REFERENCES.md`.
 
 C1 is limited to one narrower question: does representing mutually exclusive,
 correlated, concurrent, and independent future accesses as explicit joint
-outcomes improve the estimate of the first physical re-admission and repeated
-reuse of a shared block, especially when several logical claims coalesce into
-one physical access epoch?
+outcomes improve the estimate of first physical reuse demand and repeated
+reference demand epochs for a shared block, especially when several logical
+claims belong to one preregistered epoch?
 
 ## Research Question And Hypotheses
 
 **RQ-C1.** Under identical runtime state, predictor information, cache capacity,
 and downstream decision rule, does dependence-correct lease aggregation reduce
-first-re-admission estimation error and policy regret relative to PBKV-style
+first-demand estimation error and policy regret relative to PBKV-style
 additive marginals and an independence-union approximation?
 
 **H0-C1.** C1 has no lower paired error or regret than the strongest matched
 baseline on held-out traces and adversarial dependence motifs.
 
-**H1-C1.** C1 lowers paired first-re-admission probability error and downstream
+**H1-C1.** C1 lowers paired first-demand probability error and downstream
 physical-transfer regret on correlated, mutually exclusive, and coalesced
 fanout cases while preserving parity on truly independent cases.
 
@@ -71,9 +71,9 @@ Different groups are explicitly declared independent. Unknown dependence must
 be represented inside one joint group.
 
 Each outcome contains logical access claims. Claims with the same
-`reuse_epoch_id` and timestamp form one physical reuse epoch, so fanout is
-deduplicated before physical cost is counted. Let `N[g,s](D)` be the number of
-unique epochs through deadline `D`, and let:
+`reuse_epoch_id` and timestamp form one reference demand epoch, so fanout is
+deduplicated before counterfactual physical demand is counted. Let `N[g,s](D)`
+be the number of unique epochs through absolute deadline `D`, and let:
 
 ```text
 q[g](D) = sum_s p[g,s] * 1[N[g,s](D) = 0]
@@ -87,9 +87,11 @@ E_epochs(D) = sum_g sum_s p[g,s] * N[g,s](D)
 E_repeats(D) = E_epochs(D) - P_first(D)
 ```
 
-`P_first` counts the expected first physical re-admission at most once across
-all owners. `E_repeats` separates later unique reuse epochs. These quantities
-are sufficient statistics for C1; C2 will attach capacity and DMA prices.
+`P_first` counts the probability of at least one physical readmission
+opportunity if the block were absent, at most once across all owners.
+`E_repeats` separates later reference demand epochs. Actual readmission, H2D,
+and coalescing are C1-C/C1-D policy outcomes. These quantities are sufficient
+statistics for C1; C2 will attach capacity and DMA prices.
 
 ## Drift Boundary
 
@@ -114,7 +116,7 @@ viewing formal outcomes invalidates the robust claim.
    lifecycle event makes it stale.
 4. Every claim names an active retention binding, its workflow, and an eligible
    nonterminal DAG node from that snapshot.
-5. A claim or physical reuse epoch cannot span groups declared independent.
+5. A claim or reference demand epoch cannot span groups declared independent.
 6. Scenario masses are positive, outcomes are exhaustive, and each group sums
    to exactly one million PPM.
 7. Repeated claim identities and epoch timestamps must remain identical across
@@ -154,7 +156,7 @@ released implementation or a separately audited reproduction.
 - Independent variables: aggregation mode, DAG dependence motif, correlation
   strength, fanout, independent workflow count, probability drift, GPU block
   capacity, PCIe load, and predictor quality.
-- Primary dependent variables: first-re-admission probability error, paired
+- Primary dependent variables: first-demand probability error, paired
   physical H2D count and bytes, and downstream decision regret against oracle.
 - Secondary dependent variables: cache hit rate, p50/p95/p99 workflow latency,
   throughput, wasted retention block-time, policy CPU time, and peak metadata.
@@ -172,18 +174,19 @@ forecast horizon.
 
 The trace matrix will later use frozen train/calibration/formal splits. Fields
 must identify workflow instance, DAG node, binding, block, logical claim,
-physical reuse epoch, prediction cutoff, outcome, and split provenance. M4
+reference demand epoch, prediction cutoff, outcome, and split provenance. M4
 must audit that no formal future state enters the predictor or dependence
 group construction.
 
 ### Statistical Analysis
 
 - Evaluate probability forecasts with Brier score, calibration error, and
-  first-re-admission MAE. Clip an additive baseline to `[0,1]` only for
+  first-demand MAE. Clip an additive baseline to `[0,1]` only for
   probability metrics; retain its raw value for ranking experiments.
 - Use identical seeds and arrival schedules for paired policy comparisons.
-- Report paired bootstrap 95% confidence intervals for mean deltas and
-  workload-level distributions. Report median and tail effects separately.
+- Report paired split-component cluster-bootstrap 95% confidence intervals for
+  mean deltas and workload-level distributions. Report median and tail effects
+  separately.
 - Correct families of secondary comparisons with Holm's procedure.
 - Report effect sizes and confidence intervals alongside p-values.
 - Analyze the complete frozen matrix; no failed case may be silently retried or
@@ -228,10 +231,20 @@ C1-B, C1-C, C1-D, all performance effects, and all paper claims remain open.
 
 ### C1-B: Trace And Calibration Gate
 
-- M4 provenance and leakage audits pass;
-- predictor and dependence grouping use calibration data only;
-- the frozen TV radius achieves its preregistered formal coverage;
-- all baselines consume the same eligible information.
+The normative data contract is frozen separately in
+`research/protocols/M3_C1_TRACE_CALIBRATION_PROTOCOL.md`.
+
+- M4 provenance, connected-component split, censoring, and leakage audits pass;
+- the base predictor uses `TRAIN`, probability/group selection uses `CAL_FIT`,
+  and only disjoint `CAL_RADIUS` observations choose the TV radius;
+- a strategy-invariant reuse-demand label is reconstructed from durably
+  committed pre-policy demand intents, independently of actual H2D outcomes;
+- complete support, rare/unknown abstention, and zero formal support violation
+  gates pass;
+- the frozen TV radius achieves preregistered chronological formal coverage
+  and sharpness;
+- all aggregation baselines consume the same eligible information and common
+  input digest.
 
 ### C1-C: Paired Policy Gate
 
