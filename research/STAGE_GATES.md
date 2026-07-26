@@ -84,7 +84,8 @@ tolerance contributes to this item-8 or aggregate decision.
 
 ## M3: Policy Mechanisms
 
-Status: **C1_A_IMPLEMENTED_UNSEALED**. C2 and C3 have not started.
+Status: **C1_A_COMPONENT_ACCEPTED**. C1-B, C1-C, and C1-D remain open. C2 and
+C3 have not started.
 
 The normative C1 boundary and later experiment gates are frozen in
 `research/protocols/M3_C1_SHARED_LEASE_PROTOCOL.md`. The current component:
@@ -102,13 +103,14 @@ The normative C1 boundary and later experiment gates are frozen in
 - exposes C1 nominal, C1 robust-lower, a PBKV-style additive proxy, and
   independent-union modes for matched attribution.
 
-Sixteen focused C1 tests and eighteen evidence-validator tests pass; the full
-repository regression currently collects 349 tests. This is implementation
-evidence only.
-C1-A remains unsealed until a clean committed source snapshot, JUnit,
-checksums, aggregate M2 historical replay, and an independent component replay
-are frozen. C1-B trace/calibration, C1-C paired policy replay, and C1-D
-real-GPU gates remain open. No C1 performance or novelty claim is authorized.
+The sealed C1-A component bundle passed sixteen focused tests, eighteen
+evidence-validator tests, the complete 349-test repository regression, Ruff
+checks, the frozen aggregate M2 historical replay, and an independent
+fresh-process replay. The accepted source is `0467694eac84603792bc4fb5455a529297b7b2ab`;
+the external evidence identities are frozen in
+`evidence/m3/c1/M3_C1_COMPONENT_EVIDENCE_INDEX.json`. C1-B trace/calibration,
+C1-C paired policy replay, and C1-D real-GPU gates remain open. No C1
+performance or novelty claim is authorized.
 
 M3 must additionally implement an explicitly derived capacity/DMA-constrained
 joint controller (C2) and deadline-aware partial-prefix single-flight (C3).

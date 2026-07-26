@@ -22,6 +22,12 @@ root hashes in the copied manifest. Their original `SHA256SUMS` and
 payload files remain external. A stable public artifact URI remains open before
 a paper artifact release.
 
+`m3/c1/M3_C1_COMPONENT_EVIDENCE_INDEX.json` records the first accepted C1-A
+component bundle, its exact external root and hashes, fresh-process replay,
+frozen M2 historical regression, and the two prepublication failures that left
+no public artifact. The acceptance is limited to mathematical and runtime
+component correctness; later trace, policy, GPU, and paper gates remain open.
+
 Frozen documents retain their original relative paths, some of which point to
 the historical directory layout. Use `research/REFERENCES.md` and the
 `relocation` section of `IMPORT_MANIFEST.json` as resolvers. The frozen files

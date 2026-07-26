@@ -218,6 +218,14 @@ copy, replay terminal, checksums, read-only modes, and a durable publication
 sidecar. Any failed run removes its unpublished staging tree and success
 filename.
 
+The first accepted C1-A component bundle is indexed by
+`evidence/m3/c1/M3_C1_COMPONENT_EVIDENCE_INDEX.json`. It binds clean source
+HEAD `0467694eac84603792bc4fb5455a529297b7b2ab`, manifest schema v2, sixteen
+focused C1 tests, the complete 349-test repository regression, Ruff checks,
+and the historical aggregate M2 acceptance replay. A fresh process verified
+the sealed checksums and durable publication sidecar. This closes C1-A only;
+C1-B, C1-C, C1-D, all performance effects, and all paper claims remain open.
+
 ### C1-B: Trace And Calibration Gate
 
 - M4 provenance and leakage audits pass;
