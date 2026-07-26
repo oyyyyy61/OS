@@ -207,6 +207,17 @@ committed before the formal schedule is generated.
 - aggregation leaves ledger and runtime state unchanged;
 - complete M2 regression and aggregate historical replay remain valid.
 
+Production C1-A evidence is created only from a clean committed `main` HEAD by
+`tools/run_m3_c1_component_evidence.py`. The runner executes the 16-test C1
+suite, the complete repository suite, Ruff lint and format checks, then
+temporarily enters the M2 acceptance HEAD at the original repository root and
+runs the frozen aggregate validator. It must restore the exact C1 HEAD and a
+clean worktree before publication. The bundle includes exact Git blobs, a Git
+archive, JUnit identities, commands, environment, raw logs, the M2 acceptance
+copy, replay terminal, checksums, read-only modes, and a durable publication
+sidecar. Any failed run removes its unpublished staging tree and success
+filename.
+
 ### C1-B: Trace And Calibration Gate
 
 - M4 provenance and leakage audits pass;

@@ -88,9 +88,10 @@ implements exact PPM joint-outcome aggregation, explicit independence groups,
 fanout coalescing, first-versus-repeated reuse statistics, total-variation
 drift bounds, an oracle information barrier, and snapshot-staleness rejection.
 It exposes PBKV-style additive and independent-marginal baselines behind
-separate modes. Sixteen focused tests and the complete 331-test repository
-regression pass. This is unsealed C1-A component evidence; trace calibration,
-paired policy effects, GPU performance, and every C1 paper claim remain open.
+separate modes. Sixteen focused mechanism tests, eleven evidence-validator
+tests, and the complete 342-test repository regression pass. This is unsealed
+C1-A component evidence; trace calibration, paired policy effects, GPU
+performance, and every C1 paper claim remain open.
 
 ## Development
 
@@ -100,6 +101,23 @@ uv sync --frozen
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format --check .
 ```
+
+After committing a clean C1-A source snapshot, create its CPU-only evidence
+bundle with the frozen M2 acceptance identity:
+
+```bash
+.venv/bin/python tools/run_m3_c1_component_evidence.py run \
+  --output-dir /absolute/new/m3_c1_component_evidence \
+  --python "$PWD/.venv/bin/python" \
+  --m2-acceptance /absolute/M2_AGGREGATE_ACCEPTANCE.json \
+  --expected-m2-sha256 5a226b083ac34a2691017b2d1745c55e8c2968b51651fe8221f6355e40d8aee0 \
+  --accepted-m2-head 8331c4fccbcac95890becf63211123c5c9ebccc8
+```
+
+The runner records focused and full JUnit, source Git blobs and archive,
+commands, environment, lint and format checks, and an exact historical M2
+replay. It publishes with create-only rename and a durable `PUBLISHED`
+sidecar, then validates the read-only bundle again.
 
 The dependency-free project environment does not install PyTorch or vLLM, so
 the diagnostic adapter contract has a separate CPU-only check under the frozen
