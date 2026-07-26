@@ -467,6 +467,36 @@ def test_prepare_then_execute_three_fake_holdouts(
     assert all(attempts[index]["status"] == "passed" for index in (1, 3, 5, 7))
     assert attempts[6]["formal_prefix"]["prefix_record_count"] == 6
     assert (config.campaign_root / ACCEPTANCE_NAME).is_file()
+    execution_binding = attempts[0]["execution_binding"]
+    assert isinstance(execution_binding, dict)
+    sealed = formal_campaign._sealed_formal_prefix(
+        config.campaign_root / ATTEMPTS_NAME,
+        campaign_id=preregistration["campaign_id"],
+        run_names=preregistration["run_names"],
+        preregistration_sha256=preregistration_sha,
+        execution_binding=execution_binding,
+        expected_trailing_records=2,
+    )
+    assert sealed == attempts[6]["formal_prefix"]
+    with pytest.raises(FormalCampaignError, match="invalid record boundary"):
+        formal_campaign._sealed_formal_prefix(
+            config.campaign_root / ATTEMPTS_NAME,
+            campaign_id=preregistration["campaign_id"],
+            run_names=preregistration["run_names"],
+            preregistration_sha256=preregistration_sha,
+            execution_binding=execution_binding,
+            expected_trailing_records=1,
+        )
+    for invalid_trailing_records in (-1, True, 3):
+        with pytest.raises(FormalCampaignError, match="must be 0, 1, or 2"):
+            formal_campaign._sealed_formal_prefix(
+                config.campaign_root / ATTEMPTS_NAME,
+                campaign_id=preregistration["campaign_id"],
+                run_names=preregistration["run_names"],
+                preregistration_sha256=preregistration_sha,
+                execution_binding=execution_binding,
+                expected_trailing_records=invalid_trailing_records,
+            )
 
 
 def test_exact_twenty_run_order_and_final_replay_hooks(
@@ -474,16 +504,21 @@ def test_exact_twenty_run_order_and_final_replay_hooks(
 ) -> None:
     config = _config(tmp_path, monkeypatch)
     events: list[str] = []
+    replay_candidate = formal_campaign._revalidate_production_candidate
+    replay_bundle = formal_campaign._revalidate_production_bundle
+
+    def record_candidate(*args: object, **kwargs: object) -> None:
+        events.append("candidate")
+        replay_candidate(*args, **kwargs)
+
+    def record_bundle(*args: object, **kwargs: object) -> None:
+        events.append("bundle")
+        replay_bundle(*args, **kwargs)
+
     monkeypatch.setattr(
-        formal_campaign,
-        "_revalidate_production_candidate",
-        lambda *_args, **_kwargs: events.append("candidate"),
+        formal_campaign, "_revalidate_production_candidate", record_candidate
     )
-    monkeypatch.setattr(
-        formal_campaign,
-        "_revalidate_production_bundle",
-        lambda *_args, **_kwargs: events.append("bundle"),
-    )
+    monkeypatch.setattr(formal_campaign, "_revalidate_production_bundle", record_bundle)
     monkeypatch.setattr(
         formal_campaign,
         "_publish_and_revalidate_production_seal",

@@ -63,7 +63,9 @@ The earlier v2 cohort passed 59/59 under its historical driver and froze a v2
 tolerance with `atol=0.125, rtol=0`. It cannot supply a v3 parent. The fresh v3
 calibration passed 59/59 under driver 580.173.02 and froze a new v3 tolerance
 with the same fixed cap. The v3 formal cohort remains 0/20. This is
-pre-acceptance infrastructure only.
+pre-acceptance infrastructure only. Formal campaign01 completed all 20 run
+computations but failed the fail-closed post-aggregate replay before seal
+publication; it is excluded and campaign02 must restart from zero.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint

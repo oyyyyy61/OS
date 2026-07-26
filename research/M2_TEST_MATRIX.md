@@ -27,6 +27,14 @@ passed independent replay and produced a create-only v3 tolerance. The exact
 hashes are indexed in
 `evidence/m2/v3_580_173_02/M2_CALIBRATION_EVIDENCE_INDEX.json`.
 
+Formal campaign01 completed 20/20 run computations and its aggregator exited
+zero, then the launcher rejected candidate replay because its prefix helper
+mistakenly required the 41-record candidate journal to contain only the 40-run
+prefix. The append-only terminal is `validation_failed`, no bundle seal exists,
+and the entire campaign remains ineligible. Its hashes and the exact restart
+boundary are indexed in
+`evidence/m2/v3_580_173_02/M2_FORMAL_CAMPAIGN01_FAILURE_EVIDENCE_INDEX.json`.
+
 | Gate | Direct component or pilot evidence | Remaining gate-closing evidence |
 | --- | --- | --- |
 | Canonical identities | `test_domain.py`, repository import-boundary AST check, the diagnostic contract, v3 run10, and 59 fresh calibration processes bound live GPU allocation generations and exact CPU allocation records | repeat across the 20 holdout processes |

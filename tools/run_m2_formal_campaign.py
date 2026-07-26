@@ -1304,6 +1304,7 @@ def _sealed_formal_prefix(
     run_names: Sequence[str],
     preregistration_sha256: str,
     execution_binding: Mapping[str, Any],
+    expected_trailing_records: int = 0,
 ) -> dict[str, Any]:
     _require(
         attempts_path.is_file() and not attempts_path.is_symlink(),
@@ -1312,9 +1313,15 @@ def _sealed_formal_prefix(
     journal_raw = attempts_path.read_bytes()
     lines = journal_raw.splitlines(keepends=True)
     expected_records = len(run_names) * 2
+    # Candidate and bundle replay add exactly one or two aggregate records.
     _require(
-        len(lines) == expected_records
-        and all(line.endswith(b"\n") for line in lines[:expected_records]),
+        type(expected_trailing_records) is int
+        and expected_trailing_records in (0, 1, 2),
+        "formal trailing record count must be 0, 1, or 2",
+    )
+    _require(
+        len(lines) == expected_records + expected_trailing_records
+        and all(line.endswith(b"\n") for line in lines),
         "formal attempt prefix has an invalid record boundary",
     )
     for sequence, run_name in enumerate(run_names, start=1):
@@ -1538,6 +1545,7 @@ def _replay_production_evidence(
         run_names=run_names,
         preregistration_sha256=preregistration_sha256,
         execution_binding=execution_binding,
+        expected_trailing_records=1 + int(aggregate_terminal_expected),
     )
     try:
         aggregate_submitted = json.loads(lines[PRODUCTION_RUN_COUNT * 2])

@@ -1,0 +1,66 @@
+{
+  "schema_version": "dagkv.m2.formal_campaign_failure_evidence_index.v1",
+  "recorded_at_utc": "2026-07-26T06:54:39+00:00",
+  "campaign_id": "m2-formal-d0e5caa806c04fefa04e346108d85e96",
+  "campaign_root": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_formal_20260726_campaign01",
+  "protocol_schema": "dagkv.m2.vllm_abba.v3",
+  "formal_cohort_eligible": false,
+  "acceptance_claimed": false,
+  "campaign_preregistration": {
+    "file": "FORMAL_CAMPAIGN_PREREGISTRATION.json",
+    "sha256": "ba51ba950b1b2620a2159a4c9330808968fad23132d44d6ef758f66f4d36a9d0"
+  },
+  "execution_binding": {
+    "preparation_git_head": "20f3401756ee662ef802a20057b1674cfd8ace85",
+    "execution_git_head": "c035544c6fae3a399ce9e519e4ac92e98328e752",
+    "launch_marker_repository_path": "evidence/m2/FORMAL_LAUNCH_MARKER.json",
+    "launch_marker_sha256": "8be10abedc968dd421a6226b7884c678ffd90ae34eedbe59fc7f9e709cc79937"
+  },
+  "parent_binding": {
+    "calibration_manifest_sha256": "2541cc6f9506269c948ab24678af1f9563284f07473bb32bc0cf4107a9713c8e",
+    "frozen_tolerance_sha256": "8c9f0949a0517f622ae4e3630a95f48b7239ed6184cdfb3a2f27b3287e69a4e2",
+    "implementation_manifest_sha256": "7518b632a8f2f287242a432f972879cd2daa0ad10651dc58891a4265fa96c1b6",
+    "reproducibility_fingerprint": "2dd76b382fc17887d1e4d68f70b0f15c59baf766dc1254cd57533b7985992a50"
+  },
+  "formal_run_observations": {
+    "submitted_count": 20,
+    "passed_terminal_count": 20,
+    "unique_run_id_count": 20,
+    "unique_formal_run_manifest_sha256_count": 20,
+    "observed_max_abs_error": 0.109375,
+    "all_run_artifact_replays_passed": true,
+    "shared_dagkv_snapshot_sha256": "033e85fede67898600d25083378bdf1911f18f36a2f1995ccb6e77a15c1517ca"
+  },
+  "attempt_journal": {
+    "file": "FORMAL_ATTEMPTS.jsonl",
+    "sha256": "b60edf33710118cfd2ef460fd8c9dad410196c3c5dfe1165f650117747c2b9f5",
+    "record_count": 42,
+    "formal_prefix_bytes": 97416,
+    "formal_prefix_record_count": 40,
+    "formal_prefix_sha256": "b4d5fd0cb90dd5b03698a4de232e28ba4306088a6528997f13d14618a66b24b3",
+    "aggregate_submitted_count": 1,
+    "aggregate_validation_failed_count": 1,
+    "retry_count": 0
+  },
+  "acceptance_candidate": {
+    "file": "M2_ITEM8_ACCEPTANCE_MANIFEST.json",
+    "sha256": "a731fc480c93835e4507230c349f8398e9604abf529de7bfada24d3273beb693",
+    "aggregator_exit_code": 0,
+    "declared_passed_run_count": 20,
+    "eligible": false,
+    "reason": "The append-only aggregate terminal is validation_failed and no formal bundle seal was published."
+  },
+  "failure": {
+    "stage": "post_aggregate_candidate_replay",
+    "error": "formal attempt prefix has an invalid record boundary",
+    "root_cause": "The launcher correctly expected 41 candidate records, then reused a prefix helper that incorrectly required the whole journal to contain only the 40 formal-run records.",
+    "data_corruption_observed": false,
+    "formal_bundle_seal_present": false
+  },
+  "resolution": {
+    "policy": "preserve_campaign01_and_restart_from_zero",
+    "change": "Require an exact 40-record formal prefix plus an exact stage-specific aggregate suffix of zero, one, or two records, and execute the real candidate and bundle replay paths in the 20-run test.",
+    "next_campaign_root": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_formal_20260726_campaign02"
+  },
+  "claim_limit": "Diagnostic failure evidence only. Campaign01 closes no item-8, aggregate M2, performance, C1, C2, or C3 claim."
+}
