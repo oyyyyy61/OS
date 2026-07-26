@@ -1,0 +1,91 @@
+{
+  "schema_version": "dagkv.m2.aggregate_acceptance_evidence_index.v1",
+  "recorded_at_utc": "2026-07-26T11:40:56Z",
+  "acceptance_root": "/home/data/25_oyzx/dagkv_runtime/m2_aggregate_acceptance_v1_20260726_run01",
+  "acceptance": {
+    "file": "M2_AGGREGATE_ACCEPTANCE.json",
+    "schema_version": "dagkv.m2.aggregate_acceptance.v1",
+    "sha256": "5a226b083ac34a2691017b2d1745c55e8c2968b51651fe8221f6355e40d8aee0",
+    "bytes": 32519,
+    "mode": "0444",
+    "hard_link_count": 1,
+    "root_mode": "0555",
+    "accepted_at_utc": "2026-07-26T11:35:49.535193+00:00",
+    "gate_status": "M2_ACCEPTED_CORRECTNESS_ONLY",
+    "verification_status": "VERIFIED",
+    "verified_condition_count": 9,
+    "m2_item8_accepted": true,
+    "m2_accepted": true,
+    "performance_claims_supported": false,
+    "policy_claims_supported": false
+  },
+  "publication_lock": {
+    "path": "/home/data/25_oyzx/dagkv_runtime/.m2_aggregate_acceptance_v1_20260726_run01.m2-aggregate-publication.lock",
+    "state": "PUBLISHED",
+    "sha256": "07d97d714b6b8c6a4b7956ba0509850a3e70e576fbf1b33a8a8291390053907e",
+    "bytes": 10,
+    "mode": "0444",
+    "hard_link_count": 1
+  },
+  "repository": {
+    "acceptance_head": "8331c4fccbcac95890becf63211123c5c9ebccc8",
+    "acceptance_parent": "dc652660d000747f3ad0261eceadb220ea54231b",
+    "authority_blob_count": 23,
+    "validator_closure_file_count": 10,
+    "aggregate_validator_sha256": "5a94407435403717596cd1899014a12e5a567cdc01e6d123723077a077c06053",
+    "aggregate_protocol_sha256": "4d71b333eb90c28b1daac647aad795cbdfc55719fe6d4acd6a8c8006ffd21793",
+    "stage_gates_sha256_at_acceptance": "5ee2941c35ac836ab556dfbcffdd5ab89133a9c5246b08bb6a2c13513045404c"
+  },
+  "component_evidence": {
+    "root": "/home/data/25_oyzx/dagkv_runtime/m2_component_evidence_v1_20260725_run02",
+    "manifest_sha256": "7502f5e09edb6f08f4ac16b216459d3db7aca5856addb18cd2c50280149dc8c1",
+    "sha256sums_sha256": "e012c739643ea1351365111c8e2c157af310f16e6c55e85640918b873e26ac63",
+    "suite_test_counts": [
+      269,
+      13,
+      345
+    ],
+    "total_test_count": 627,
+    "required_condition_reference_count": 29,
+    "external_replay_passed": true,
+    "raw_only_replay_passed": true
+  },
+  "formal_evidence": {
+    "campaign_id": "m2-formal-e686bfd8792041c7a714d35e0b122066",
+    "root": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_formal_20260726_campaign02",
+    "preregistration_sha256": "f49f61e2ae380f54a61510a0946a2bd1e9fe6662a455ba9320cb7e3c39405d90",
+    "seal_sha256": "3f1e77164d13595b525e1962634b138b184496656489bc2b443eab9dffe1ded7",
+    "calibration_manifest_sha256": "2541cc6f9506269c948ab24678af1f9563284f07473bb32bc0cf4107a9713c8e",
+    "frozen_tolerance_sha256": "8c9f0949a0517f622ae4e3630a95f48b7239ed6184cdfb3a2f27b3287e69a4e2",
+    "calibration_run_count": 59,
+    "formal_run_count": 20,
+    "global_unique_eligible_run_id_count": 79,
+    "cohort_identity_sha256": "89a15c352cf1b3ef80a2a3a6af61d0d79a27860edff1bf06fdc23e8d16a3976b",
+    "retry_policy": "none_stop_on_first_failure",
+    "full_bundle_replay_passed": true
+  },
+  "exclusion_audit": {
+    "excluded_run_id_count": 22,
+    "eligible_run_id_count": 79,
+    "eligible_run_id_intersection_count": 0,
+    "campaign01_journal_record_count": 42,
+    "campaign01_journal_sha256": "b60edf33710118cfd2ef460fd8c9dad410196c3c5dfe1165f650117747c2b9f5"
+  },
+  "provenance_audit": {
+    "protected_git_entry_count": 20,
+    "normalized_base_dependency_count": 239,
+    "external_file_count": 23,
+    "external_combined_manifest_sha256": "6f4135c7402bbce7dcff33ee14ea0d6e57a061afa5c7c505ac4e88c3503c4455",
+    "historical_compatibility_passed": true,
+    "current_external_content_rehash_passed": true
+  },
+  "independent_fresh_process_replay": {
+    "validated_at_utc": "2026-07-26T11:40:56Z",
+    "passed": true,
+    "validator_repository_path": "tools/m2_aggregate_acceptance.py",
+    "expected_acceptance_sha256": "5a226b083ac34a2691017b2d1745c55e8c2968b51651fe8221f6355e40d8aee0",
+    "gate_status": "M2_ACCEPTED_CORRECTNESS_ONLY"
+  },
+  "claim_limit": "Accepts M2 lifecycle and data-plane correctness for one process, one RTX 4090, and GPU plus primary CPU-DRAM under the frozen Qwen3-8B v3 ABBA profile. It supports no latency, throughput, hit-rate, scheduling-policy, novelty, C1, C2, C3, or paper-performance claim.",
+  "next_action": "Begin M3 with dependence-correct probabilistic shared leases (C1) behind an independent switch and matched first-order baselines; keep C2 and C3 separately ablatable."
+}

@@ -15,11 +15,12 @@ The project is intentionally independent:
 
 ## Current gate
 
-M1 is imported as scoped evidence. M2 is active under the v3 evidence protocol.
-M2 requires a single-process GPU plus CPU-DRAM lifecycle loop with shared-owner
-isolation, idempotent release, generation safety, transfer integrity, no
-use-after-free, and output correctness. Performance mechanisms remain out of
-scope until M2 passes.
+M1 is imported as scoped evidence. M2 is accepted for correctness only under
+the v3 evidence protocol. The accepted scope is one process, one RTX 4090, and
+GPU plus primary CPU-DRAM with shared-owner isolation, idempotent release,
+generation safety, transfer integrity, no use-after-free, and output
+correctness. Latency, throughput, hit-rate, scheduling-policy, novelty, C1, C2,
+C3, and paper-performance claims remain open for M3-M6.
 
 The clean runtime now contains the canonical schema, transactional lifecycle
 ledger, DAG node gate, generation-safe transfer reservations, shared-owner
@@ -44,9 +45,10 @@ formal holdouts. One formal run can record only one holdout pass. Item 8 closes
 only after the complete 20-run holdout set passes a closed-set audit and is
 referenced by an aggregate acceptance manifest. Exact source, binary, model,
 environment, command, and raw-evidence provenance is fail-closed throughout.
-Campaign02 now satisfies this item-8 boundary. Aggregate M2 remains open until
-a cross-evidence audit verifies all nine conditions and records a separate
-aggregate acceptance decision.
+Campaign02 satisfies this item-8 boundary. The subsequent cross-evidence audit
+verified all nine M2 conditions and published the create-only aggregate
+decision indexed in
+`evidence/m2/v3_580_173_02/M2_AGGREGATE_ACCEPTANCE_EVIDENCE_INDEX.json`.
 
 The calibration path now uses a two-stage, no-retry campaign launcher and a
 closed cohort validator. `tools/m2_raw_replay.py` independently reloads the
@@ -69,7 +71,9 @@ but failed the fail-closed post-aggregate replay before seal publication and
 remains excluded. Campaign02 restarted from zero, passed 20/20 holdouts, closed
 the exact 42-record journal, published the item-8 acceptance manifest and
 create-only bundle seal, and passed independent full-bundle replay. Item 8 is
-closed; aggregate M2 and every performance claim remain open.
+closed. The separately published aggregate decision passed a fresh full replay,
+so M2 correctness is accepted; every performance and M3 policy claim remains
+open.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint
@@ -139,6 +143,7 @@ JUnit, and checksums before and after read-only sealing. It supports M2 items
 See `research/ARCHITECTURE.md`, `research/M2_RUNTIME_CONTRACT.md`,
 `research/STAGE_GATES.md`, `research/protocols/M2_VLLM_REPLAY_PROTOCOL.md`,
 `research/protocols/M2_COMPONENT_EVIDENCE_PROTOCOL.md`,
+`research/protocols/M2_AGGREGATE_ACCEPTANCE_PROTOCOL.md`,
 `research/REFERENCES.md`, and
 `evidence/IMPORT_MANIFEST.json` for the normative boundaries and first-order
 prior-work constraints.

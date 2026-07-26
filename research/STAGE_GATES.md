@@ -12,6 +12,12 @@ Updated: 2026-07-26.
 
 ## M2: Canonical Runtime
 
+Status: **ACCEPTED_CORRECTNESS_ONLY**. The create-only aggregate decision and
+fresh independent replay are indexed in
+`evidence/m2/v3_580_173_02/M2_AGGREGATE_ACCEPTANCE_EVIDENCE_INDEX.json`.
+This status authorizes no performance, scheduling-policy, novelty, C1, C2, or
+C3 claim.
+
 M2 passes only when all conditions below have direct evidence:
 
 1. exactly one canonical block, binding, lease, workflow, replica, transfer,
@@ -39,15 +45,17 @@ M2 passes only when all conditions below have direct evidence:
 Component tests can close items 1-7 only after the three-suite deterministic
 contract in `research/protocols/M2_COMPONENT_EVIDENCE_PROTOCOL.md` produces a
 create-only, read-only `M2_COMPONENT_EVIDENCE.json` bundle and independent
-replay passes. That bundle cannot close item 8 or aggregate M2. Every attempt indexed by
-`evidence/m2/PILOT_ATTEMPTS.json`, plus any protocol-validation execution before
-the calibration v3 launch marker, is a pilot excluded from the 59 calibration
-processes. Any validation execution before the formal launch marker is excluded
-from the 20 formal holdouts. Each formal run can emit only one holdout-pass
-manifest. Item 8 closes only after a closed-set aggregator verifies 20/20 new
+replay passes. That bundle cannot close item 8 or aggregate M2. Every attempt
+indexed by `evidence/m2/PILOT_ATTEMPTS.json`, plus any protocol-validation
+execution before the calibration v3 launch marker, is a pilot excluded from the
+59 calibration processes. Any validation execution before the formal launch
+marker is excluded from the 20 formal holdouts. Each formal run can emit only
+one holdout-pass manifest. Item 8 closes only after a closed-set aggregator
+verifies 20/20 new
 holdouts under one frozen tolerance and writes
 `M2_ITEM8_ACCEPTANCE_MANIFEST.json`. That manifest does not close aggregate M2;
-M2 remains open until all nine conditions pass.
+all nine conditions must pass the separate aggregate protocol. That aggregate
+protocol has now passed and recorded `M2_ACCEPTED_CORRECTNESS_ONLY`.
 
 M2 establishes lifecycle and data-plane correctness only. It makes no latency,
 throughput, hit-rate, scheduling-policy, or novelty claim. Tokencake already
@@ -66,10 +74,13 @@ passed, the v3 calibration is 59/59, and its create-only tolerance is frozen.
 The first formal campaign failed its post-aggregate replay before seal
 publication and remains excluded. Campaign02 restarted from zero, passed 20/20,
 published the item-8 acceptance manifest and create-only seal, and passed
-independent full-bundle replay. Item 8 is closed under v3; aggregate M2 remains
-open until a cross-evidence audit verifies all nine conditions and records a
-separate aggregate acceptance decision. No v2 sample or tolerance contributes
-to this item-8 decision.
+independent full-bundle replay. Item 8 is closed under v3 and remains
+independently scoped from the later aggregate decision. The cross-evidence
+audit then replayed 627 component cases, 59 calibration runs, 20 formal
+holdouts, the historical compatibility bridge, 22 excluded run IDs with zero
+eligible overlap, and 23 current external files. Its create-only output passed
+a fresh independent replay, closing M2 for correctness only. No v2 sample or
+tolerance contributes to this item-8 or aggregate decision.
 
 ## M3-M6
 

@@ -1,7 +1,8 @@
 # M2 Canonical Runtime Contract
 
-Status: active component contract, 2026-07-24. This document does not record an
-M2 acceptance decision.
+Status: accepted M2 correctness contract, 2026-07-26. The decision identity is
+recorded in
+`evidence/m2/v3_580_173_02/M2_AGGREGATE_ACCEPTANCE_EVIDENCE_INDEX.json`.
 
 ## Scope
 
@@ -110,5 +111,8 @@ at or after that deadline; an earlier explicit teardown uses `CANCELLED`.
 Component tests may close M2 conditions 1-7 in `STAGE_GATES.md`. M2 additionally
 requires a forced D2H/H2D vLLM replay with exact token equality, frozen logit
 tolerances, engine/version provenance, raw traces, and a read-only evidence
-package. Until that succeeds, the project reports M2 as open and makes no
-performance claim.
+package. The v3 calibration/formal chain and the separate nine-condition
+aggregate replay have now passed, so this contract is accepted within its
+single-process, one-GPU plus primary CPU-DRAM scope. The decision makes no
+latency, throughput, hit-rate, scheduling-policy, novelty, C1, C2, C3, or
+paper-performance claim.
