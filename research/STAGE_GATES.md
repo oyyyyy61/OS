@@ -1,6 +1,6 @@
 # DAGKV Stage Gates
 
-Updated: 2026-07-25.
+Updated: 2026-07-26.
 
 ## Imported Gates
 
@@ -61,9 +61,10 @@ The prior 59/59 v2 calibration is retained as historical evidence under its
 original driver and implementation fingerprint. The current v3 gate binds the
 exact NVIDIA Debian package payloads, loaded driver `580.173.02`, and actual
 mapped `libcuda`; it therefore requires a new excluded pilot, 59-process
-calibration, frozen tolerance, and 20-process formal cohort. The v3 calibration
-is currently 0/59, the v3 tolerance does not yet exist, and the formal cohort is
-0/20. No v2 sample or tolerance can satisfy item 8 under v3.
+calibration, frozen tolerance, and 20-process formal cohort. The excluded pilot
+passed, the v3 calibration is 59/59, its create-only tolerance is frozen, and
+the formal cohort is 0/20. No v2 sample or tolerance can satisfy item 8 under
+v3.
 
 ## M3-M6
 

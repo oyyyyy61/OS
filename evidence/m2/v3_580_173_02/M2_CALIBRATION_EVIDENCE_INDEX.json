@@ -1,0 +1,79 @@
+{
+  "schema_version": "dagkv.m2.v3_calibration_evidence_index.v1",
+  "recorded_at_utc": "2026-07-26T05:59:02+00:00",
+  "campaign_id": "m2-calibration-81343d92fe004cc5bc8ac73dddb985f6",
+  "campaign_root": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_calibration_20260726_campaign01",
+  "protocol_schema": "dagkv.m2.vllm_abba.v3",
+  "calibration_bundle_eligible": true,
+  "acceptance_claimed": false,
+  "campaign_preregistration": {
+    "file": "CAMPAIGN_PREREGISTRATION.json",
+    "sha256": "2ae93465db9683f4a2b7d560e393159adc3d10c4cf95c542286bca5708d1db99"
+  },
+  "attempt_journal": {
+    "file": "ATTEMPTS.jsonl",
+    "sha256": "b5dba61a7c46b796da605764a790ac22d95a159bc759371c12f1e8ba3f69d76e",
+    "record_count": 120,
+    "calibration_prefix_record_count": 118,
+    "calibration_prefix_sha256": "5fb6dcf853a551305f7f4d912c91b96c85e42c2183859f3b7bdd61daf7ed9dd9",
+    "retry_count": 0,
+    "nonpassing_terminal_count": 0
+  },
+  "calibration_manifest": {
+    "file": "M2_CALIBRATION_MANIFEST.json",
+    "sha256": "2541cc6f9506269c948ab24678af1f9563284f07473bb32bc0cf4107a9713c8e",
+    "schema_version": "dagkv.m2.calibration_cohort.v3"
+  },
+  "frozen_tolerance": {
+    "repository_path": "evidence/m2/v3_580_173_02/M2_FROZEN_TOLERANCE.json",
+    "sha256": "8c9f0949a0517f622ae4e3630a95f48b7239ed6184cdfb3a2f27b3287e69a4e2",
+    "schema_version": "dagkv.m2.frozen_tolerance.v2",
+    "atol": 0.125,
+    "rtol": 0,
+    "calibration_run_count": 59
+  },
+  "execution_binding": {
+    "preparation_git_head": "621b46710b3113185ce165655ae226a9c8bb2771",
+    "execution_git_head": "534c2f0edb776968015a2bedcaee31e9848e7121",
+    "launch_marker_repository_path": "evidence/m2/CALIBRATION_V3_LAUNCH_MARKER.json",
+    "launch_marker_sha256": "bd6db48ebab7d89d785d65bc13df9061729140960f4b38353a11994f7d9d615c",
+    "dagkv_snapshot_sha256": "98433dbaba6389ff2fac3610ad5b860e1081abee5f30c99a887ac364a8fd54c6"
+  },
+  "source_and_runtime": {
+    "implementation_manifest_sha256": "7518b632a8f2f287242a432f972879cd2daa0ad10651dc58891a4265fa96c1b6",
+    "reproducibility_fingerprint": "2dd76b382fc17887d1e4d68f70b0f15c59baf766dc1254cd57533b7985992a50",
+    "vllm_snapshot_sha256": "f9515d24f33c03580e48d4b660339f9573504bd532b998895ce673461166f07e",
+    "nvidia_driver_version": "580.173.02",
+    "nvidia_userspace_bundle_manifest_sha256": "5024d87db69d7136e1dc14e33b6cec143c2411c7cf78eb3142a08e0436d602ee",
+    "nvidia_userspace_bundle_content_digest": "3a0284cce5cc9a6ff74f6176e8a913d33d195b679ffc5d829c0c3671b55b785c",
+    "base_dependency_count": 239,
+    "base_dependency_manifest_sha256": "e797f0e5bd261f1b168dc72439f69efe48706696018369554e941c1535dc3feb",
+    "effective_dependency_count": 250,
+    "effective_dependency_manifest_sha256": "8f788db64878352d8df9993b09de54590fd58285305cc084cd5c427e536c14ad",
+    "added_dependency_count": 11,
+    "added_dependency_manifest_sha256": "cbe0e20b70ab078684a409e53a044968ac4cd666e878e9fb5a899cc4050afbd6",
+    "removed_dependency_count": 0
+  },
+  "observations": {
+    "run_count": 59,
+    "unique_run_id_count": 59,
+    "unique_result_sha256_count": 59,
+    "unique_provenance_sha256_count": 59,
+    "unique_sha256sums_sha256_count": 59,
+    "all_passed": true,
+    "failures": [],
+    "all_phase_token_id": 932,
+    "minimum_top1_margin": 0.4375,
+    "observed_max_abs_error": 0.109375,
+    "within_frozen_tolerance": true,
+    "bytes_per_dma": 2359296,
+    "transfer_digest": "c18a2c102f5afef89d1bd422898626c8a766c00cfeb67610da41ff667172bdc4"
+  },
+  "independent_bundle_replay": {
+    "passed": true,
+    "manifest_sha256": "2541cc6f9506269c948ab24678af1f9563284f07473bb32bc0cf4107a9713c8e",
+    "validated_run_count": 59
+  },
+  "claim_limit": "Successful M2 v3 calibration and frozen tolerance only. Formal holdouts, item-8 acceptance, aggregate M2, performance, C1, C2, and C3 claims remain open.",
+  "next_action": "Commit this tolerance and evidence, then prepare a fresh 20-process M2 v3 formal holdout campaign."
+}

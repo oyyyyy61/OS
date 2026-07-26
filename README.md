@@ -61,8 +61,9 @@ bundle root, manifest, content digest, and driver version.
 
 The earlier v2 cohort passed 59/59 under its historical driver and froze a v2
 tolerance with `atol=0.125, rtol=0`. It cannot supply a v3 parent. The fresh v3
-calibration remains 0/59, no v3 tolerance has been frozen, and the v3 formal
-cohort remains 0/20. This is pre-acceptance infrastructure only.
+calibration passed 59/59 under driver 580.173.02 and froze a new v3 tolerance
+with the same fixed cap. The v3 formal cohort remains 0/20. This is
+pre-acceptance infrastructure only.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint
