@@ -92,9 +92,10 @@ assert args.expected_nvidia_userspace_bundle_manifest_sha256 == os.environ[
 assert args.expected_nvidia_userspace_bundle_content_digest == os.environ[
     "FAKE_BUNDLE_CONTENT_DIGEST"
 ]
-assert os.environ["LD_LIBRARY_PATH"].split(":", maxsplit=1)[0] == os.environ[
-    "FAKE_BUNDLE_LIBRARY_PATH"
-]
+assert os.environ["LD_LIBRARY_PATH"] == (
+    f"{os.environ['FAKE_BUNDLE_LIBRARY_PATH']}:/usr/local/cuda/lib64"
+)
+assert "LD_AUDIT" not in os.environ and "LD_PRELOAD" not in os.environ
 index = int(args.output_dir.name.removeprefix("run-"))
 mode, _, target = os.environ.get("FAKE_FORMAL_MODE", "success").partition(":")
 selected = bool(target) and index == int(target)

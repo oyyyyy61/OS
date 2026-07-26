@@ -102,13 +102,27 @@ removing write bits, and proves that their closed union equals the read-only
 `rootfs` tree. It also requires the package version, loaded kernel module,
 bundle SONAME targets, and `nvidia-smi` driver report to agree.
 
-The runner starts with the validated bundle library directory first in
-`LD_LIBRARY_PATH`, invokes the bundle's absolute `nvidia-smi`, rejects
+The runner requires `LD_LIBRARY_PATH` to equal the validated bundle library
+directory followed by exactly `/usr/local/cuda/lib64`, invokes the bundle's
+absolute `nvidia-smi`, rejects
 `LD_PRELOAD` and `LD_AUDIT`, and proves from `/proc/self/maps` that its sole
 mapped `libcuda` resolves to the sealed bundle inode and hash. Fresh bundle
 validation occurs before CUDA initialization and after evidence construction;
 the full mutation-sensitive filesystem snapshot must remain equal. A version,
 digest, inode, path, mapping, or environment mismatch fails the attempt.
+
+Runtime imports execute inside an audited spawn boundary. The runner records
+the exact launch loader string, base dependency set, and initial `sys.path`.
+It permits only the exact OpenCV bootstrap prefix derived from the loaded
+virtual-environment module and only the exact setuptools vendor path appended
+by the loaded setuptools module. The OpenCV directory must remain inside the
+same Python prefix and contain no `libcuda` candidate. Before EngineCore spawn,
+the runner restores the launch loader string byte-for-byte, rejects loader
+injection again, revalidates the NVIDIA bundle, and binds the base, added, and
+effective dependency sets in provenance. Independent raw replay reconstructs
+these relationships and rejects missing, removed, reordered, or external
+entries. `PYTHONPATH` preparation is idempotent so the declared integration
+path appears once.
 
 The 59-process v2 calibration under driver `580.159.03` remains immutable
 historical evidence. An unattended package upgrade followed by reboot changed

@@ -83,6 +83,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 INTEGRATION_ROOT = REPO_ROOT / "integrations" / "vllm_m2"
 PROTOCOL_SOURCE = REPO_ROOT / "research" / "protocols" / ("M2_VLLM_REPLAY_PROTOCOL.md")
 LOADER_INJECTION_VARIABLES = ("LD_AUDIT", "LD_PRELOAD")
+RUNTIME_IMPORT_BOUNDARY_SCHEMA = "dagkv.m2.runtime_import_boundary.v1"
+CUDA_LIBRARY_PATH = "/usr/local/cuda/lib64"
 
 
 class M2ValidationError(RuntimeError):
@@ -121,6 +123,21 @@ class Measurement:
     elapsed_ms: float
     top1_margin: float
     logits: Any
+
+
+@dataclass(slots=True)
+class RuntimeImports:
+    np: Any
+    torch: Any
+    LLM: Any
+    SamplingParams: Any
+    TokensPrompt: Any
+    KVTransferConfig: Any
+    connector_module: Any
+    spec_module: Any
+    dependencies: dict[str, Any]
+    boundary: dict[str, Any]
+    effective_sys_path: tuple[str, ...]
 
 
 def require(condition: bool, message: str) -> None:
@@ -243,10 +260,11 @@ def _validate_nvidia_bundle(
         "NVIDIA kernel module version differs from CLI expectation",
     )
     library_path = str(validation.library_path)
-    loader_path = os.environ.get("LD_LIBRARY_PATH", "").split(":", maxsplit=1)[0]
+    loader_path = os.environ.get("LD_LIBRARY_PATH", "")
     require(
-        loader_path == library_path,
-        "LD_LIBRARY_PATH must begin with the validated NVIDIA bundle library path",
+        loader_path == f"{library_path}:{CUDA_LIBRARY_PATH}",
+        "LD_LIBRARY_PATH must exactly match the validated NVIDIA bundle "
+        "and CUDA library paths",
     )
     return validation
 
@@ -1699,7 +1717,298 @@ def _dependency_capture() -> dict[str, Any]:
     return {"packages": entries, "manifest_sha256": _canonical_digest(entries)}
 
 
-def _system_capture(torch: Any, *, nvidia_bundle: BundleValidation) -> dict[str, Any]:
+def _dependency_pairs(
+    capture: Mapping[str, Any], *, label: str
+) -> set[tuple[str, str]]:
+    require(
+        set(capture) == {"manifest_sha256", "packages"},
+        f"{label} dependency capture fields differ",
+    )
+    packages = capture["packages"]
+    require(
+        isinstance(packages, list) and packages, f"{label} dependency list is empty"
+    )
+    pairs: list[tuple[str, str]] = []
+    for entry in packages:
+        require(
+            isinstance(entry, dict) and set(entry) == {"name", "version"},
+            f"{label} dependency entry fields differ",
+        )
+        name, version = entry["name"], entry["version"]
+        require(
+            isinstance(name, str) and name and isinstance(version, str) and version,
+            f"{label} dependency name/version is invalid",
+        )
+        pairs.append((name, version))
+    require(
+        pairs == sorted(set(pairs)),
+        f"{label} dependency list order differs",
+    )
+    require(
+        capture["manifest_sha256"] == _canonical_digest(packages),
+        f"{label} dependency manifest differs",
+    )
+    return set(pairs)
+
+
+def _dependency_origins(
+    pairs: set[tuple[str, str]],
+) -> dict[tuple[str, str], set[Path]]:
+    origins = {pair: set() for pair in pairs}
+    for distribution in importlib_metadata.distributions():
+        pair = (
+            distribution.metadata.get("Name", "<unnamed>"),
+            distribution.version,
+        )
+        if pair in origins:
+            origins[pair].add(Path(distribution.locate_file("")).resolve())
+    return origins
+
+
+def _expected_cv2_loader_path() -> str | None:
+    module = sys.modules.get("cv2")
+    if module is None:
+        return None
+    module_file = getattr(module, "__file__", None)
+    require(isinstance(module_file, str) and module_file, "cv2 module path is missing")
+    module_dir = Path(module_file).resolve().parent
+    python_prefix = Path(sys.prefix).resolve()
+    require(
+        module_dir.is_relative_to(python_prefix)
+        and module_dir.name == "cv2"
+        and module_dir.parent.name == "site-packages",
+        "cv2 module layout differs from the frozen Python environment",
+    )
+    return os.path.join(os.path.join(str(module_dir), "../../"), "lib64")
+
+
+def _expected_setuptools_vendor_path() -> Path | None:
+    module = sys.modules.get("setuptools")
+    if module is None:
+        return None
+    module_file = getattr(module, "__file__", None)
+    require(
+        isinstance(module_file, str) and module_file,
+        "setuptools module path is missing",
+    )
+    vendor = (Path(module_file).resolve().parent / "_vendor").resolve()
+    require(vendor.is_dir(), "setuptools vendor dependency directory is missing")
+    require(
+        vendor.is_relative_to(Path(sys.prefix).resolve())
+        and vendor.name == "_vendor"
+        and vendor.parent.name == "setuptools"
+        and vendor.parent.parent.name == "site-packages",
+        "setuptools vendor layout differs from the frozen Python environment",
+    )
+    return vendor
+
+
+def _restore_runtime_import_boundary(
+    *,
+    nvidia_bundle: BundleValidation,
+    frozen_ld_library_path: str,
+    launch_sys_path: Sequence[str],
+    base_dependencies: Mapping[str, Any],
+    effective_dependencies: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Audit known import-time mutations and restore the exact spawn environment."""
+
+    observed_ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+    effective_sys_path = list(sys.path)
+    try:
+        _reject_loader_injection()
+        frozen_parts = frozen_ld_library_path.split(":")
+        require(
+            frozen_ld_library_path and all(frozen_parts),
+            "frozen LD_LIBRARY_PATH contains an empty entry",
+        )
+        require(
+            frozen_parts[0] == str(nvidia_bundle.library_path),
+            "frozen LD_LIBRARY_PATH differs from the validated NVIDIA bundle",
+        )
+
+        expected_cv2_path = _expected_cv2_loader_path()
+        allowed_loader_values = {frozen_ld_library_path}
+        if expected_cv2_path is not None:
+            allowed_loader_values.add(f"{expected_cv2_path}:{frozen_ld_library_path}")
+            resolved_cv2_path = Path(expected_cv2_path).resolve()
+            require(
+                resolved_cv2_path.is_relative_to(Path(sys.prefix).resolve()),
+                "OpenCV loader path escapes the frozen Python environment",
+            )
+            try:
+                driver_candidates = tuple(resolved_cv2_path.glob("libcuda.so*"))
+            except OSError as exc:
+                raise M2ValidationError(
+                    f"cannot inspect the OpenCV loader path: {exc}"
+                ) from exc
+            require(
+                not driver_candidates,
+                "OpenCV loader path contains an NVIDIA driver library",
+            )
+        require(
+            observed_ld_library_path in allowed_loader_values,
+            "runtime imports changed LD_LIBRARY_PATH outside the frozen OpenCV policy",
+        )
+        prepended_loader_paths = (
+            []
+            if observed_ld_library_path == frozen_ld_library_path
+            else [expected_cv2_path]
+        )
+
+        launch_sys_path_list = list(launch_sys_path)
+        require(
+            effective_sys_path[: len(launch_sys_path_list)] == launch_sys_path_list,
+            "runtime imports reordered or removed launch sys.path entries",
+        )
+        added_sys_paths = effective_sys_path[len(launch_sys_path_list) :]
+        expected_vendor = _expected_setuptools_vendor_path()
+        allowed_added_sys_paths = (
+            [] if expected_vendor is None else [str(expected_vendor)]
+        )
+        require(
+            added_sys_paths in ([], allowed_added_sys_paths),
+            "runtime imports added an unexpected sys.path entry",
+        )
+
+        base_pairs = _dependency_pairs(base_dependencies, label="base")
+        effective_pairs = _dependency_pairs(effective_dependencies, label="effective")
+        removed_pairs = sorted(base_pairs - effective_pairs)
+        added_pairs = sorted(effective_pairs - base_pairs)
+        require(
+            not removed_pairs,
+            "runtime imports removed a dependency from the effective view",
+        )
+        require(
+            not added_pairs or expected_vendor is not None,
+            "runtime imports exposed dependencies without a setuptools vendor path",
+        )
+        origins = _dependency_origins(set(added_pairs))
+        added_dependencies: list[dict[str, str]] = []
+        for name, version in added_pairs:
+            pair_origins = origins[(name, version)]
+            require(
+                expected_vendor is not None and pair_origins == {expected_vendor},
+                f"runtime dependency origin differs for {name}=={version}",
+            )
+            added_dependencies.append(
+                {"name": name, "version": version, "origin": str(expected_vendor)}
+            )
+        require(
+            effective_pairs == base_pairs | set(added_pairs),
+            "effective dependency set cannot be reconstructed",
+        )
+        added_manifest_entries = [
+            {"name": item["name"], "version": item["version"]}
+            for item in added_dependencies
+        ]
+        return {
+            "schema_version": RUNTIME_IMPORT_BOUNDARY_SCHEMA,
+            "python_prefix": str(Path(sys.prefix).resolve()),
+            "loader_environment": {
+                "frozen_at_launch": frozen_ld_library_path,
+                "observed_after_imports": observed_ld_library_path,
+                "restored_before_spawn": frozen_ld_library_path,
+                "expected_cv2_prefix": expected_cv2_path,
+                "prepended_paths": prepended_loader_paths,
+                "policy": "exact_launch_or_exact_cv2_prefix_then_restore",
+            },
+            "sys_path": {
+                "before_imports": launch_sys_path_list,
+                "after_imports": effective_sys_path,
+                "added_paths": added_sys_paths,
+                "expected_setuptools_vendor_path": (
+                    str(expected_vendor) if expected_vendor is not None else None
+                ),
+            },
+            "dependencies": {
+                "base": dict(base_dependencies),
+                "effective_manifest_sha256": effective_dependencies["manifest_sha256"],
+                "effective_count": len(effective_dependencies["packages"]),
+                "added": added_dependencies,
+                "added_manifest_sha256": _canonical_digest(added_manifest_entries),
+                "removed": [],
+            },
+        }
+    finally:
+        os.environ["LD_LIBRARY_PATH"] = frozen_ld_library_path
+
+
+def _load_runtime_imports(
+    *,
+    nvidia_bundle: BundleValidation,
+    frozen_ld_library_path: str,
+) -> RuntimeImports:
+    """Load optional runtime modules within one fail-closed mutation boundary."""
+
+    _prepare_import_path()
+    launch_sys_path = tuple(sys.path)
+    base_dependencies = _dependency_capture()
+    try:
+        np = importlib.import_module("numpy")
+        torch = importlib.import_module("torch")
+        vllm = importlib.import_module("vllm")
+        LLM = vllm.LLM
+        SamplingParams = vllm.SamplingParams
+        TokensPrompt = vllm.TokensPrompt
+        KVTransferConfig = importlib.import_module("vllm.config").KVTransferConfig
+        connector_module = importlib.import_module("dagkv_vllm_m2.connector")
+        spec_module = importlib.import_module("dagkv_vllm_m2.spec")
+        effective_dependencies = _dependency_capture()
+        boundary = _restore_runtime_import_boundary(
+            nvidia_bundle=nvidia_bundle,
+            frozen_ld_library_path=frozen_ld_library_path,
+            launch_sys_path=launch_sys_path,
+            base_dependencies=base_dependencies,
+            effective_dependencies=effective_dependencies,
+        )
+    finally:
+        os.environ["LD_LIBRARY_PATH"] = frozen_ld_library_path
+    return RuntimeImports(
+        np=np,
+        torch=torch,
+        LLM=LLM,
+        SamplingParams=SamplingParams,
+        TokensPrompt=TokensPrompt,
+        KVTransferConfig=KVTransferConfig,
+        connector_module=connector_module,
+        spec_module=spec_module,
+        dependencies=effective_dependencies,
+        boundary=boundary,
+        effective_sys_path=tuple(sys.path),
+    )
+
+
+def _require_frozen_runtime_boundary(
+    *,
+    frozen_ld_library_path: str,
+    effective_sys_path: Sequence[str],
+    effective_dependencies: Mapping[str, Any],
+    stage: str,
+) -> None:
+    """Reject any mutation after the audited runtime-import boundary."""
+
+    _reject_loader_injection()
+    require(
+        os.environ.get("LD_LIBRARY_PATH") == frozen_ld_library_path,
+        f"LD_LIBRARY_PATH changed {stage}",
+    )
+    require(
+        list(sys.path) == list(effective_sys_path),
+        f"sys.path changed {stage}",
+    )
+    require(
+        _dependency_capture() == effective_dependencies,
+        f"effective dependencies changed {stage}",
+    )
+
+
+def _system_capture(
+    torch: Any,
+    *,
+    nvidia_bundle: BundleValidation,
+    runtime_import_boundary: Mapping[str, Any],
+) -> dict[str, Any]:
     properties = torch.cuda.get_device_properties(0)
     try:
         smi = subprocess.run(
@@ -1764,6 +2073,7 @@ def _system_capture(torch: Any, *, nvidia_bundle: BundleValidation) -> dict[str,
             "build_config": torch.__config__.show(),
         },
         "environment": relevant_environment,
+        "runtime_import_boundary": dict(runtime_import_boundary),
     }
 
 
@@ -1798,10 +2108,23 @@ def _prepare_import_path() -> None:
     integration = str(INTEGRATION_ROOT)
     if integration not in sys.path:
         sys.path.insert(0, integration)
-    current = os.environ.get("PYTHONPATH")
-    os.environ["PYTHONPATH"] = (
-        integration if not current else f"{integration}:{current}"
+    current_entries = [
+        entry
+        for entry in os.environ.get("PYTHONPATH", "").split(":")
+        if entry and entry != integration
+    ]
+    os.environ["PYTHONPATH"] = ":".join([integration, *current_entries])
+
+
+def _resolve_create_only_output_dir(path: Path) -> Path:
+    """Reject every pre-existing directory entry before resolving the output path."""
+
+    expanded = path.expanduser()
+    require(
+        not os.path.lexists(expanded),
+        f"output path already exists: {expanded.absolute()}",
     )
+    return expanded.resolve()
 
 
 def _capability_preflight(
@@ -1932,9 +2255,8 @@ def _run(
     output_dir: Path,
     run_started_ns: int,
     nvidia_bundle: BundleValidation,
+    frozen_ld_library_path: str,
 ) -> None:
-    import numpy as np
-
     prompt_ids = validate_prompt_tokens(PROMPT_TOKEN_IDS)
     require(
         args.full_provenance,
@@ -1978,13 +2300,31 @@ def _run(
         require(atol >= 0.0 and math.isfinite(atol), "atol must be non-negative")
         require(rtol >= 0.0 and math.isfinite(rtol), "rtol must be non-negative")
 
-    _prepare_import_path()
-    import torch
-    from vllm import LLM, SamplingParams, TokensPrompt
-    from vllm.config import KVTransferConfig
-
-    connector_module = importlib.import_module("dagkv_vllm_m2.connector")
-    spec_module = importlib.import_module("dagkv_vllm_m2.spec")
+    runtime = _load_runtime_imports(
+        nvidia_bundle=nvidia_bundle,
+        frozen_ld_library_path=frozen_ld_library_path,
+    )
+    np = runtime.np
+    torch = runtime.torch
+    LLM = runtime.LLM
+    SamplingParams = runtime.SamplingParams
+    TokensPrompt = runtime.TokensPrompt
+    KVTransferConfig = runtime.KVTransferConfig
+    connector_module = runtime.connector_module
+    spec_module = runtime.spec_module
+    dependencies = runtime.dependencies
+    post_import_bundle = _validate_nvidia_bundle(
+        args.nvidia_userspace_bundle_root,
+        expected_manifest_sha256=(
+            args.expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        expected_content_digest=args.expected_nvidia_userspace_bundle_content_digest,
+        expected_driver_version=args.expected_nvidia_driver_version,
+    )
+    require(
+        post_import_bundle == nvidia_bundle,
+        "NVIDIA userspace bundle changed across runtime imports",
+    )
     preflight = _capability_preflight(
         LLM=LLM,
         KVTransferConfig=KVTransferConfig,
@@ -2043,8 +2383,11 @@ def _run(
         args.vllm_root,
         full_hashes=args.full_provenance,
     )
-    dependencies = _dependency_capture()
-    system = _system_capture(torch, nvidia_bundle=nvidia_bundle)
+    system = _system_capture(
+        torch,
+        nvidia_bundle=nvidia_bundle,
+        runtime_import_boundary=runtime.boundary,
+    )
     static_connector_config = {
         key: value
         for key, value in connector_extra.items()
@@ -2122,6 +2465,24 @@ def _run(
     }
     _write_json(output_dir / "provenance.json", provenance)
 
+    _require_frozen_runtime_boundary(
+        frozen_ld_library_path=frozen_ld_library_path,
+        effective_sys_path=runtime.effective_sys_path,
+        effective_dependencies=dependencies,
+        stage="before EngineCore spawn",
+    )
+    spawn_bundle = _validate_nvidia_bundle(
+        args.nvidia_userspace_bundle_root,
+        expected_manifest_sha256=(
+            args.expected_nvidia_userspace_bundle_manifest_sha256
+        ),
+        expected_content_digest=args.expected_nvidia_userspace_bundle_content_digest,
+        expected_driver_version=args.expected_nvidia_driver_version,
+    )
+    require(
+        spawn_bundle == nvidia_bundle,
+        "NVIDIA userspace bundle changed before EngineCore spawn",
+    )
     llm = LLM(**llm_kwargs)
     try:
         vocab_size = _validate_engine_config(llm)
@@ -2418,6 +2779,12 @@ def _run(
     )
     _verify_file_stats(model_capture, kind="model")
     _verify_file_stats(runtime_binaries, kind="runtime_binaries")
+    _require_frozen_runtime_boundary(
+        frozen_ld_library_path=frozen_ld_library_path,
+        effective_sys_path=runtime.effective_sys_path,
+        effective_dependencies=dependencies,
+        stage="during EngineCore execution",
+    )
     post_nvidia_bundle = _validate_nvidia_bundle(
         args.nvidia_userspace_bundle_root,
         expected_manifest_sha256=(
@@ -2579,11 +2946,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             expected_driver_version=args.expected_nvidia_driver_version,
         )
+        frozen_ld_library_path = os.environ["LD_LIBRARY_PATH"]
     except M2ValidationError as exc:
         print(f"M2 ABBA failed before artifact creation: {exc}", file=sys.stderr)
         return 1
 
-    output_dir = args.output_dir.resolve()
+    output_dir = _resolve_create_only_output_dir(args.output_dir)
     for protected_root in (
         REPO_ROOT.resolve(),
         args.vllm_root.resolve(),
@@ -2604,7 +2972,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
     try:
-        _run(args, output_dir, run_started_ns, nvidia_bundle)
+        _run(
+            args,
+            output_dir,
+            run_started_ns,
+            nvidia_bundle,
+            frozen_ld_library_path,
+        )
     except Exception as exc:
         for name in (
             "M2_ITEM8_FORMAL_RUN_MANIFEST.json",

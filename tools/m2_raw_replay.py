@@ -69,6 +69,8 @@ except ModuleNotFoundError as exc:
     )
 
 PROTOCOL_SCHEMA = "dagkv.m2.vllm_abba.v3"
+RUNTIME_IMPORT_BOUNDARY_SCHEMA = "dagkv.m2.runtime_import_boundary.v1"
+CUDA_LIBRARY_PATH = "/usr/local/cuda/lib64"
 DIAGNOSTIC_SCHEMA = "dagkv.vllm_m2.transfer_probe.v1"
 LIFECYCLE_SCHEMA = "kv_lifecycle_event_v2"
 NVIDIA_PACKAGE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9+.-]*")
@@ -816,6 +818,246 @@ def _validate_nvidia_driver_userspace(
         "captured loader injection environment is forbidden",
     )
     return content_digest
+
+
+def _validate_runtime_import_boundary(
+    *,
+    system: dict[str, Any],
+    effective_packages: list[dict[str, str]],
+    effective_dependency_sha: str,
+    nvidia_library: str,
+    runtime_executable_entry: str,
+) -> None:
+    boundary = system.get("runtime_import_boundary")
+    require(
+        isinstance(boundary, dict)
+        and set(boundary)
+        == {
+            "schema_version",
+            "python_prefix",
+            "loader_environment",
+            "sys_path",
+            "dependencies",
+        },
+        "runtime import boundary fields differ",
+    )
+    require(
+        boundary["schema_version"] == RUNTIME_IMPORT_BOUNDARY_SCHEMA,
+        "runtime import boundary schema differs",
+    )
+    python_prefix = _resolved_absolute_path(
+        boundary["python_prefix"], label="runtime Python prefix"
+    )
+    runtime_python_parent = Path(runtime_executable_entry).parent.parent.resolve()
+    require(
+        runtime_python_parent == python_prefix,
+        "runtime Python prefix differs from the captured executable entry",
+    )
+
+    loader = boundary["loader_environment"]
+    require(
+        isinstance(loader, dict)
+        and set(loader)
+        == {
+            "frozen_at_launch",
+            "observed_after_imports",
+            "restored_before_spawn",
+            "expected_cv2_prefix",
+            "prepended_paths",
+            "policy",
+        },
+        "runtime loader-boundary fields differ",
+    )
+    frozen = _nonempty_string(
+        loader["frozen_at_launch"], label="frozen runtime loader path"
+    )
+    require(all(frozen.split(":")), "frozen runtime loader path has an empty entry")
+    require(
+        frozen == f"{nvidia_library}:{CUDA_LIBRARY_PATH}",
+        "frozen runtime loader path differs from the NVIDIA/CUDA binding",
+    )
+    environment = system.get("environment")
+    require(isinstance(environment, dict), "system environment provenance is missing")
+    require(
+        loader["restored_before_spawn"] == frozen
+        and environment.get("LD_LIBRARY_PATH") == frozen,
+        "runtime loader path was not restored before spawn",
+    )
+    require(
+        loader["policy"] == "exact_launch_or_exact_cv2_prefix_then_restore",
+        "runtime loader-boundary policy differs",
+    )
+    observed = _nonempty_string(
+        loader["observed_after_imports"], label="post-import runtime loader path"
+    )
+    expected_cv2 = loader["expected_cv2_prefix"]
+    prepended = loader["prepended_paths"]
+    require(isinstance(prepended, list), "runtime prepended loader paths are invalid")
+    if expected_cv2 is None:
+        require(
+            observed == frozen and prepended == [],
+            "runtime loader mutation lacks a frozen cv2 binding",
+        )
+    else:
+        expected_cv2 = _nonempty_string(
+            expected_cv2, label="expected cv2 loader prefix"
+        )
+        require(
+            expected_cv2.endswith("/site-packages/cv2/../../lib64"),
+            "expected cv2 loader prefix shape differs",
+        )
+        normalized_cv2 = Path(os.path.normpath(expected_cv2)).resolve()
+        require(
+            normalized_cv2.is_relative_to(python_prefix),
+            "expected cv2 loader prefix escapes the runtime Python prefix",
+        )
+        require(
+            (observed, tuple(prepended))
+            in {
+                (frozen, ()),
+                (f"{expected_cv2}:{frozen}", (expected_cv2,)),
+            },
+            "observed cv2 loader mutation differs",
+        )
+
+    path_capture = boundary["sys_path"]
+    require(
+        isinstance(path_capture, dict)
+        and set(path_capture)
+        == {
+            "before_imports",
+            "after_imports",
+            "added_paths",
+            "expected_setuptools_vendor_path",
+        },
+        "runtime sys.path boundary fields differ",
+    )
+    before = path_capture["before_imports"]
+    after = path_capture["after_imports"]
+    added_paths = path_capture["added_paths"]
+    require(
+        isinstance(before, list)
+        and all(isinstance(item, str) for item in before)
+        and isinstance(after, list)
+        and all(isinstance(item, str) for item in after)
+        and isinstance(added_paths, list)
+        and all(isinstance(item, str) and item for item in added_paths),
+        "runtime sys.path boundary values are invalid",
+    )
+    require(
+        after == [*before, *added_paths], "runtime sys.path append relation differs"
+    )
+    vendor = path_capture["expected_setuptools_vendor_path"]
+    if vendor is None:
+        require(not added_paths, "runtime sys.path addition lacks a vendor binding")
+    else:
+        vendor_path = _resolved_absolute_path(
+            vendor, label="setuptools vendor dependency path"
+        )
+        require(
+            vendor_path.is_relative_to(python_prefix)
+            and vendor_path.as_posix().endswith("/site-packages/setuptools/_vendor"),
+            "setuptools vendor dependency path differs",
+        )
+        require(
+            added_paths in ([], [vendor]),
+            "runtime sys.path additions exceed the setuptools vendor path",
+        )
+
+    dependency_boundary = boundary["dependencies"]
+    require(
+        isinstance(dependency_boundary, dict)
+        and set(dependency_boundary)
+        == {
+            "base",
+            "effective_manifest_sha256",
+            "effective_count",
+            "added",
+            "added_manifest_sha256",
+            "removed",
+        },
+        "runtime dependency-boundary fields differ",
+    )
+    base = dependency_boundary["base"]
+    require(
+        isinstance(base, dict) and set(base) == {"manifest_sha256", "packages"},
+        "base dependency capture fields differ",
+    )
+    base_packages = base["packages"]
+    require(
+        isinstance(base_packages, list) and base_packages, "base dependencies are empty"
+    )
+
+    def package_pairs(
+        entries: list[dict[str, str]], *, label: str
+    ) -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        for entry in entries:
+            require(
+                isinstance(entry, dict) and set(entry) == {"name", "version"},
+                f"{label} dependency entry fields differ",
+            )
+            pairs.append(
+                (
+                    _nonempty_string(entry["name"], label=f"{label} dependency name"),
+                    _nonempty_string(
+                        entry["version"], label=f"{label} dependency version"
+                    ),
+                )
+            )
+        require(pairs == sorted(set(pairs)), f"{label} dependency order differs")
+        return pairs
+
+    base_pairs = package_pairs(base_packages, label="base")
+    require(
+        _lower_sha256(base["manifest_sha256"], label="base dependency manifest")
+        == _canonical_digest(base_packages),
+        "base dependency manifest differs",
+    )
+    require(
+        dependency_boundary["effective_manifest_sha256"] == effective_dependency_sha
+        and dependency_boundary["effective_count"] == len(effective_packages),
+        "effective dependency boundary differs from provenance",
+    )
+    require(
+        dependency_boundary["removed"] == [],
+        "runtime dependency boundary removed a package",
+    )
+    added = dependency_boundary["added"]
+    require(isinstance(added, list), "runtime added dependencies are invalid")
+    added_entries: list[dict[str, str]] = []
+    added_pairs: list[tuple[str, str]] = []
+    for entry in added:
+        require(
+            isinstance(entry, dict) and set(entry) == {"name", "version", "origin"},
+            "runtime added dependency fields differ",
+        )
+        name = _nonempty_string(entry["name"], label="added dependency name")
+        version = _nonempty_string(entry["version"], label="added dependency version")
+        origin = _nonempty_string(entry["origin"], label="added dependency origin")
+        require(
+            vendor is not None and origin == vendor,
+            "runtime added dependency origin differs",
+        )
+        added_pairs.append((name, version))
+        added_entries.append({"name": name, "version": version})
+    require(
+        added_pairs == sorted(set(added_pairs)),
+        "runtime added dependency order differs",
+    )
+    require(
+        _lower_sha256(
+            dependency_boundary["added_manifest_sha256"],
+            label="added dependency manifest",
+        )
+        == _canonical_digest(added_entries),
+        "added dependency manifest differs",
+    )
+    effective_pairs = [(item["name"], item["version"]) for item in effective_packages]
+    require(
+        set(effective_pairs) == set(base_pairs) | set(added_pairs),
+        "effective dependencies cannot be reconstructed from the import boundary",
+    )
 
 
 def _validate_run_tree(run_dir: Path) -> None:
@@ -2251,6 +2493,15 @@ def _validate_provenance(
         argv=argv,
         system=system,
         started=started,
+    )
+    _validate_runtime_import_boundary(
+        system=system,
+        effective_packages=packages,
+        effective_dependency_sha=dependency_sha,
+        nvidia_library=provenance["nvidia_driver_userspace"]["runtime"][
+            "library_directory"
+        ],
+        runtime_executable_entry=provenance["executable"],
     )
     preflight = provenance["preflight"]
     require(

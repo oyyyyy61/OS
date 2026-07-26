@@ -34,6 +34,64 @@ def test_replays_complete_raw_bundle(tmp_path: Path) -> None:
     assert validated.minimum_top1_margin == 1.0
 
 
+def test_replays_audited_cv2_and_setuptools_import_mutations(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    build_raw_run(run_dir)
+    provenance_path = run_dir / "provenance.json"
+    result_path = run_dir / "result.json"
+    provenance = json.loads(provenance_path.read_text())
+    result = json.loads(result_path.read_text())
+    system = provenance["system"]
+    boundary = system["runtime_import_boundary"]
+    frozen = system["environment"]["LD_LIBRARY_PATH"]
+    cv2_prefix = "/fixture/venv/lib/python3.12/site-packages/cv2/../../lib64"
+    vendor = "/fixture/venv/lib/python3.12/site-packages/setuptools/_vendor"
+    added_entry = {"name": "vendored", "version": "2"}
+    effective_packages = sorted(
+        [*provenance["dependencies"]["packages"], added_entry],
+        key=lambda item: (item["name"], item["version"]),
+    )
+    effective_sha = _canonical(effective_packages)
+
+    provenance["dependencies"] = {
+        "packages": effective_packages,
+        "manifest_sha256": effective_sha,
+    }
+    boundary["loader_environment"].update(
+        {
+            "observed_after_imports": f"{cv2_prefix}:{frozen}",
+            "expected_cv2_prefix": cv2_prefix,
+            "prepended_paths": [cv2_prefix],
+        }
+    )
+    boundary["sys_path"].update(
+        {
+            "after_imports": [*boundary["sys_path"]["before_imports"], vendor],
+            "added_paths": [vendor],
+            "expected_setuptools_vendor_path": vendor,
+        }
+    )
+    boundary["dependencies"].update(
+        {
+            "effective_manifest_sha256": effective_sha,
+            "effective_count": len(effective_packages),
+            "added": [{**added_entry, "origin": vendor}],
+            "added_manifest_sha256": _canonical([added_entry]),
+        }
+    )
+    components = provenance["reproducibility_components"]
+    components["dependency_manifest_sha256"] = effective_sha
+    components["system"] = system
+    fingerprint = _canonical(components)
+    provenance["reproducibility_fingerprint"] = fingerprint
+    result["reproducibility_fingerprint"] = fingerprint
+    _write_json(provenance_path, provenance)
+    _write_json(result_path, result)
+    _reseal(run_dir)
+
+    validate_raw_run(run_dir)
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -312,6 +370,57 @@ def test_rejects_multiply_linked_evidence_file(tmp_path: Path) -> None:
     os.link(run_dir / "result.json", tmp_path / "external-result-link.json")
 
     with pytest.raises(M2RawReplayError, match="exactly one hard link"):
+        validate_raw_run(run_dir)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("loader", "observed cv2 loader mutation differs"),
+        ("restored", "was not restored before spawn"),
+        ("sys_path", "sys.path append relation differs"),
+        ("dependency_origin", "added dependency origin differs"),
+        ("dependency_removed", "removed a package"),
+        ("dependency_count", "differs from provenance"),
+        ("python_prefix", "differs from the captured executable entry"),
+    ],
+)
+def test_rejects_resealed_runtime_import_boundary_tampering(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    run_dir = tmp_path / "run"
+    build_raw_run(run_dir)
+    path = run_dir / "provenance.json"
+    provenance = json.loads(path.read_text())
+    boundary = provenance["system"]["runtime_import_boundary"]
+    if mutation == "loader":
+        boundary["loader_environment"]["expected_cv2_prefix"] = (
+            "/fixture/venv/lib/python3.12/site-packages/cv2/../../lib64"
+        )
+        boundary["loader_environment"]["observed_after_imports"] = (
+            "/unknown:/fixture/bundle"
+        )
+    elif mutation == "restored":
+        boundary["loader_environment"]["restored_before_spawn"] = "/unknown"
+    elif mutation == "sys_path":
+        boundary["sys_path"]["after_imports"].append("/unknown")
+    elif mutation == "dependency_origin":
+        boundary["sys_path"]["expected_setuptools_vendor_path"] = (
+            "/fixture/venv/lib/python3.12/site-packages/setuptools/_vendor"
+        )
+        boundary["dependencies"]["added"] = [
+            {"name": "extra", "version": "1", "origin": "/unknown"}
+        ]
+    elif mutation == "dependency_removed":
+        boundary["dependencies"]["removed"] = [{"name": "fixture", "version": "1"}]
+    elif mutation == "python_prefix":
+        boundary["python_prefix"] = "/fixture/other-venv"
+    else:
+        boundary["dependencies"]["effective_count"] += 1
+    _write_json(path, provenance)
+    _reseal(run_dir)
+
+    with pytest.raises(M2RawReplayError, match=message):
         validate_raw_run(run_dir)
 
 

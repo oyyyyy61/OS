@@ -645,7 +645,7 @@ def build_raw_run(
     }
     extension = _manifest_entry("vllm/_C.abi3.so", b"extension")
     extension.update({"mtime_ns": 1, "inode": 10})
-    executable_path = python_executable or Path("/fixture/python")
+    executable_path = python_executable or Path("/fixture/venv/bin/python")
     runtime_python_path = executable_path.resolve(strict=False)
     python_entry = {
         "path": str(runtime_python_path),
@@ -718,7 +718,43 @@ def build_raw_run(
             ),
             "nvidia_smi_executable": nvidia["runtime"]["nvidia_smi"],
         },
-        "environment": {"LD_LIBRARY_PATH": nvidia["runtime"]["library_directory"]},
+        "environment": {
+            "LD_LIBRARY_PATH": (
+                f"{nvidia['runtime']['library_directory']}:/usr/local/cuda/lib64"
+            )
+        },
+        "runtime_import_boundary": {
+            "schema_version": "dagkv.m2.runtime_import_boundary.v1",
+            "python_prefix": str(executable_path.parent.parent.resolve()),
+            "loader_environment": {
+                "frozen_at_launch": (
+                    f"{nvidia['runtime']['library_directory']}:/usr/local/cuda/lib64"
+                ),
+                "observed_after_imports": (
+                    f"{nvidia['runtime']['library_directory']}:/usr/local/cuda/lib64"
+                ),
+                "restored_before_spawn": (
+                    f"{nvidia['runtime']['library_directory']}:/usr/local/cuda/lib64"
+                ),
+                "expected_cv2_prefix": None,
+                "prepended_paths": [],
+                "policy": "exact_launch_or_exact_cv2_prefix_then_restore",
+            },
+            "sys_path": {
+                "before_imports": ["/fixture/venv/lib/python3.12/site-packages"],
+                "after_imports": ["/fixture/venv/lib/python3.12/site-packages"],
+                "added_paths": [],
+                "expected_setuptools_vendor_path": None,
+            },
+            "dependencies": {
+                "base": dependencies,
+                "effective_manifest_sha256": dependencies["manifest_sha256"],
+                "effective_count": len(dependencies["packages"]),
+                "added": [],
+                "added_manifest_sha256": _canonical([]),
+                "removed": [],
+            },
+        },
     }
     components = {
         "implementation_manifest_sha256": implementation["manifest_sha256"],

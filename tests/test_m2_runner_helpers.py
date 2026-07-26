@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import time
 from dataclasses import dataclass
@@ -57,6 +58,10 @@ class _Flat:
 
     def __len__(self) -> int:
         return len(self.start_indices)
+
+
+def _capture_spawn_loader(queue: object) -> None:
+    queue.put(os.environ.get("LD_LIBRARY_PATH"))
 
 
 def _endpoint(tier: str, slot: int, generation: int, digest: str) -> dict:
@@ -181,6 +186,209 @@ def test_rejects_loader_injection_even_when_value_is_empty() -> None:
         runner_module._reject_loader_injection({"LD_AUDIT": "/tmp/audit.so"})
 
 
+def _dependency_fixture(*pairs: tuple[str, str]) -> dict[str, object]:
+    packages = [
+        {"name": name, "version": version} for name, version in sorted(set(pairs))
+    ]
+    return {
+        "packages": packages,
+        "manifest_sha256": runner_module._canonical_digest(packages),
+    }
+
+
+def test_runtime_import_boundary_restores_exact_loader_and_records_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    python_prefix = tmp_path / "venv"
+    cv2_dir = python_prefix / "lib/python3.12/site-packages/cv2"
+    cv2_dir.mkdir(parents=True)
+    cv2_file = cv2_dir / "__init__.py"
+    cv2_file.write_text("# fixture\n", encoding="utf-8")
+    setuptools_dir = python_prefix / "lib/python3.12/site-packages/setuptools"
+    vendor = setuptools_dir / "_vendor"
+    vendor.mkdir(parents=True)
+    setuptools_file = setuptools_dir / "__init__.py"
+    setuptools_file.write_text("# fixture\n", encoding="utf-8")
+    bundle_library = tmp_path / "bundle/rootfs/usr/lib/x86_64-linux-gnu"
+    bundle_library.mkdir(parents=True)
+    frozen = f"{bundle_library}:/usr/local/cuda/lib64"
+    launch_sys_path = [str(python_prefix / "site")]
+    effective_sys_path = [*launch_sys_path, str(vendor.resolve())]
+    base = _dependency_fixture(("base", "1"))
+    effective = _dependency_fixture(("base", "1"), ("vendored", "2"))
+
+    monkeypatch.setattr(runner_module.sys, "prefix", str(python_prefix))
+    monkeypatch.setattr(runner_module.sys, "path", effective_sys_path)
+    monkeypatch.setitem(
+        runner_module.sys.modules, "cv2", SimpleNamespace(__file__=str(cv2_file))
+    )
+    monkeypatch.setitem(
+        runner_module.sys.modules,
+        "setuptools",
+        SimpleNamespace(__file__=str(setuptools_file)),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_dependency_origins",
+        lambda pairs: {pair: {vendor.resolve()} for pair in pairs},
+    )
+    expected_cv2 = runner_module._expected_cv2_loader_path()
+    monkeypatch.setenv("LD_LIBRARY_PATH", f"{expected_cv2}:{frozen}")
+
+    capture = runner_module._restore_runtime_import_boundary(
+        nvidia_bundle=SimpleNamespace(library_path=bundle_library),
+        frozen_ld_library_path=frozen,
+        launch_sys_path=launch_sys_path,
+        base_dependencies=base,
+        effective_dependencies=effective,
+    )
+
+    assert os.environ["LD_LIBRARY_PATH"] == frozen
+    assert capture["loader_environment"]["observed_after_imports"] == (
+        f"{expected_cv2}:{frozen}"
+    )
+    assert capture["loader_environment"]["restored_before_spawn"] == frozen
+    assert capture["sys_path"]["added_paths"] == [str(vendor.resolve())]
+    assert capture["dependencies"]["added"] == [
+        {"name": "vendored", "version": "2", "origin": str(vendor.resolve())}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("frozen_prefix", "observed_prefix", "injection", "message"),
+    [
+        ("bundle", "/unknown", None, "outside the frozen OpenCV policy"),
+        ("/host", "/host", None, "differs from the validated NVIDIA bundle"),
+        ("bundle", "bundle", "LD_PRELOAD", "loader injection"),
+        ("bundle", "bundle", "LD_AUDIT", "loader injection"),
+    ],
+)
+def test_runtime_import_boundary_rejects_unfrozen_loader_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    frozen_prefix: str,
+    observed_prefix: str,
+    injection: str | None,
+    message: str,
+) -> None:
+    bundle_library = tmp_path / "bundle"
+    frozen = f"{bundle_library if frozen_prefix == 'bundle' else frozen_prefix}:/cuda"
+    observed = (
+        f"{bundle_library if observed_prefix == 'bundle' else observed_prefix}:/cuda"
+    )
+    dependencies = _dependency_fixture(("base", "1"))
+    monkeypatch.delitem(runner_module.sys.modules, "cv2", raising=False)
+    monkeypatch.delitem(runner_module.sys.modules, "setuptools", raising=False)
+    monkeypatch.setattr(runner_module.sys, "path", ["/base"])
+    monkeypatch.setenv("LD_LIBRARY_PATH", observed)
+    if injection is not None:
+        monkeypatch.setenv(injection, "/injected.so")
+
+    with pytest.raises(M2ValidationError, match=message):
+        runner_module._restore_runtime_import_boundary(
+            nvidia_bundle=SimpleNamespace(library_path=bundle_library),
+            frozen_ld_library_path=frozen,
+            launch_sys_path=["/base"],
+            base_dependencies=dependencies,
+            effective_dependencies=dependencies,
+        )
+
+    assert os.environ["LD_LIBRARY_PATH"] == frozen
+
+
+def test_runtime_import_loader_is_restored_when_import_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen = f"{tmp_path / 'bundle'}:/cuda"
+    monkeypatch.setenv("LD_LIBRARY_PATH", frozen)
+    monkeypatch.setattr(runner_module, "_prepare_import_path", lambda: None)
+    monkeypatch.setattr(
+        runner_module,
+        "_dependency_capture",
+        lambda: _dependency_fixture(("base", "1")),
+    )
+
+    def fail_import(_: str) -> object:
+        os.environ["LD_LIBRARY_PATH"] = f"/mutated:{frozen}"
+        raise RuntimeError("fixture import failed")
+
+    monkeypatch.setattr(runner_module.importlib, "import_module", fail_import)
+    with pytest.raises(RuntimeError, match="fixture import failed"):
+        runner_module._load_runtime_imports(
+            nvidia_bundle=SimpleNamespace(library_path=tmp_path / "bundle"),
+            frozen_ld_library_path=frozen,
+        )
+    assert os.environ["LD_LIBRARY_PATH"] == frozen
+
+
+def test_prepare_import_path_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    integration = str(runner_module.INTEGRATION_ROOT)
+    monkeypatch.setenv("PYTHONPATH", f"{integration}:/other:{integration}")
+    monkeypatch.setattr(runner_module.sys, "path", [integration, "/other"])
+
+    runner_module._prepare_import_path()
+    first = os.environ["PYTHONPATH"]
+    runner_module._prepare_import_path()
+
+    assert first == f"{integration}:/other"
+    assert os.environ["PYTHONPATH"] == first
+    assert runner_module.sys.path == [integration, "/other"]
+
+
+def test_create_only_output_rejects_dangling_symlink(tmp_path: Path) -> None:
+    output = tmp_path / "run"
+    output.symlink_to(tmp_path / "missing-target")
+
+    with pytest.raises(M2ValidationError, match="already exists"):
+        runner_module._resolve_create_only_output_dir(output)
+
+
+def test_create_only_output_resolves_absent_path(tmp_path: Path) -> None:
+    output = tmp_path / "run"
+
+    assert runner_module._resolve_create_only_output_dir(output) == output.resolve()
+
+
+def test_engine_spawn_boundary_rejects_late_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frozen = "/bundle:/cuda"
+    dependencies = _dependency_fixture(("base", "1"))
+    monkeypatch.setenv("LD_LIBRARY_PATH", frozen)
+    monkeypatch.setattr(runner_module.sys, "path", ["/frozen"])
+    monkeypatch.setattr(runner_module, "_dependency_capture", lambda: dependencies)
+
+    runner_module._require_frozen_runtime_boundary(
+        frozen_ld_library_path=frozen,
+        effective_sys_path=["/frozen"],
+        effective_dependencies=dependencies,
+        stage="before EngineCore spawn",
+    )
+    monkeypatch.setenv("LD_LIBRARY_PATH", f"/late:{frozen}")
+    with pytest.raises(M2ValidationError, match="before EngineCore spawn"):
+        runner_module._require_frozen_runtime_boundary(
+            frozen_ld_library_path=frozen,
+            effective_sys_path=["/frozen"],
+            effective_dependencies=dependencies,
+            stage="before EngineCore spawn",
+        )
+
+
+def test_spawn_child_inherits_restored_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    frozen = "/bundle:/cuda"
+    monkeypatch.setenv("LD_LIBRARY_PATH", frozen)
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    process = context.Process(target=_capture_spawn_loader, args=(queue,))
+
+    process.start()
+    process.join(timeout=10)
+
+    assert process.exitcode == 0
+    assert queue.get(timeout=1) == frozen
+    queue.close()
+
+
 def test_nvidia_bundle_validation_binds_digest_and_loader_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -237,7 +445,7 @@ def test_nvidia_bundle_validation_binds_digest_and_loader_path(
             expected_driver_version=driver_version,
         )
     monkeypatch.setenv("LD_LIBRARY_PATH", "/host/driver")
-    with pytest.raises(M2ValidationError, match="must begin"):
+    with pytest.raises(M2ValidationError, match="must exactly match"):
         runner_module._validate_nvidia_bundle(
             tmp_path,
             expected_manifest_sha256=manifest_digest,
