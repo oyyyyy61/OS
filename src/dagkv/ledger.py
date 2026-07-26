@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from threading import RLock
 
@@ -119,13 +119,21 @@ class EventLedger:
 
     SCHEMA_VERSION = "dagkv_lifecycle_event_v1"
 
-    def __init__(self, *, run_id: str, phase: str, source: str) -> None:
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        phase: str,
+        source: str,
+        mutation_guard: Callable[[], None] | None = None,
+    ) -> None:
         require_text("run_id", run_id)
         require_text("phase", phase)
         require_text("source", source)
         self.run_id = run_id
         self.phase = phase
         self.source = source
+        self._mutation_guard = mutation_guard
         self._events: list[LifecycleEvent] = []
         self._events_by_id: dict[str, LifecycleEvent] = {}
         self._seen_identities = self._empty_identity_registry()
@@ -160,6 +168,8 @@ class EventLedger:
         """
 
         batch = tuple(drafts)
+        if self._mutation_guard is not None:
+            self._mutation_guard()
         if not batch:
             return ()
         with self._lock:

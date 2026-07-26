@@ -8,6 +8,14 @@ from dataclasses import dataclass
 from threading import RLock
 
 from dagkv.c1_leases import LeaseOwnerSnapshot, SharedLeasePolicySnapshot
+from dagkv.c1_trace import (
+    AtomicCutoffView,
+    CutoffCommitter,
+    DemandCommitter,
+    DurableCommitReceipt,
+    PreServiceDemandView,
+    WaiterIdentity,
+)
 from dagkv.domain import (
     AuditReport,
     BindingHandle,
@@ -68,9 +76,19 @@ class LifecycleOrchestrator:
         run_id: str,
         phase: str = "m2_component",
         source: str = "dagkv.orchestrator",
+        trace_required: bool = False,
     ) -> None:
+        if type(trace_required) is not bool:
+            raise IdentityError("trace_required must be a bool")
         self._lock = RLock()
-        self._ledger = EventLedger(run_id=run_id, phase=phase, source=source)
+        self._trace_callback_active = False
+        self._ledger = EventLedger(
+            run_id=run_id,
+            phase=phase,
+            source=source,
+            mutation_guard=self._guard_runtime_mutation,
+        )
+        self._trace_required = trace_required
         self._workflows: dict[WorkflowKey, WorkflowRecord] = {}
         self._blocks: dict[BlockKey, BlockRecord] = {}
         self._bindings: dict[str, OwnerBinding] = {}
@@ -80,6 +98,13 @@ class LifecycleOrchestrator:
         self._execution_history: dict[ExecutionRef, tuple[BlockKey, str]] = {}
         self._execution_mappings: dict[ExecutionRef, ExecutionMapping] = {}
         self._execution_mapping_generations: dict[str, int] = {}
+        self._committed_demand_ids: dict[
+            str,
+            tuple[BlockKey, tuple[tuple[str, ExecutionRef], ...]],
+        ] = {}
+        self._demand_id_by_execution: dict[ExecutionRef, str] = {}
+        # Monotonic: removing an active waiter must not erase prior service.
+        self._transfer_waiter_history: set[str] = set()
         self._transfers: dict[str, Transfer] = {}
         self._reservations: dict[ReplicaId, ReplicaReservation] = {}
 
@@ -92,7 +117,8 @@ class LifecycleOrchestrator:
     def events(self) -> tuple[LifecycleEvent, ...]:
         """Return an immutable ledger snapshot."""
 
-        return self._ledger.events
+        with self._lock:
+            return self._ledger.events
 
     def workflow_snapshot(self, key: WorkflowKey) -> WorkflowRecord:
         """Return a detached workflow snapshot."""
@@ -128,40 +154,56 @@ class LifecycleOrchestrator:
         """Project active retention owners into an immutable C1 input."""
 
         with self._lock:
-            block = self._block(key)
-            owners: list[LeaseOwnerSnapshot] = []
-            for binding_id in sorted(block.binding_ids):
-                binding = self._bindings[binding_id]
-                if not binding.active or binding.kind != BindingKind.WORKFLOW_RETENTION:
-                    continue
-                workflow = self._workflow(binding.workflow)
-                eligible_node_ids = tuple(
-                    sorted(
-                        node.node_id
-                        for node in workflow.nodes.values()
-                        if node.status
-                        in {NodeStatus.PENDING, NodeStatus.READY, NodeStatus.RUNNING}
-                    )
-                )
-                owners.append(
-                    LeaseOwnerSnapshot(
-                        binding_id=binding.binding_id,
-                        workflow=binding.workflow,
-                        created_ns=binding.created_ns,
-                        eligible_node_ids=eligible_node_ids,
-                    )
-                )
-            return SharedLeasePolicySnapshot(
-                block_key=key,
-                runtime_event_count=len(self._ledger.events),
-                location_version=block.location_version,
-                residency=block.residency,
-                owners=tuple(owners),
+            lifecycle_prefix = self._ledger.events
+            return self._shared_lease_policy_snapshot_locked(
+                key,
+                runtime_event_count=len(lifecycle_prefix),
             )
+
+    def commit_shared_lease_cutoff(
+        self,
+        key: BlockKey,
+        *,
+        cutoff_ns: int,
+        horizon_duration_ns: int,
+        committer: CutoffCommitter,
+    ) -> tuple[AtomicCutoffView, DurableCommitReceipt]:
+        """Durably bind one forecast attempt to an atomic runtime prefix."""
+
+        self._guard_runtime_mutation()
+        with self._lock:
+            view = self._atomic_cutoff_view_locked(
+                key,
+                cutoff_ns=cutoff_ns,
+                horizon_duration_ns=horizon_duration_ns,
+            )
+            if self._trace_callback_active:
+                raise StateTransitionError("trace committer callback cannot reenter")
+            self._trace_callback_active = True
+            try:
+                receipt = committer.commit_cutoff(view)
+            finally:
+                self._trace_callback_active = False
+            current = self._atomic_cutoff_view_locked(
+                key,
+                cutoff_ns=cutoff_ns,
+                horizon_duration_ns=horizon_duration_ns,
+            )
+            if current != view:
+                raise StateTransitionError(
+                    "cutoff committer changed the atomic runtime view"
+                )
+            self._validate_trace_receipt(
+                receipt,
+                event_count=len(view.lifecycle_prefix),
+                view_digest=view.view_digest,
+            )
+            return view, receipt
 
     def register_workflow(self, spec: WorkflowSpec) -> bool:
         """Register one immutable DAG, initializing roots as ready."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             existing = self._workflows.get(spec.key)
             if existing is not None:
@@ -195,6 +237,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Start one ready DAG node and open its ledger lifetime."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             record = self._active_workflow(workflow)
             node = self._node(record, node_id)
@@ -233,6 +276,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Complete one running node and release newly ready successors."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             record = self._workflow(workflow)
             node = self._node(record, node_id)
@@ -293,6 +337,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Fail one running node and close the entire workflow safely."""
 
+        self._guard_runtime_mutation()
         require_text("node error", error)
         with self._lock:
             record = self._workflow(workflow)
@@ -323,6 +368,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Close all owners after every DAG node has completed."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             record = self._workflow(workflow)
             if record.status == WorkflowStatus.DONE:
@@ -355,6 +401,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Cancel active nodes and release every owner in one workflow."""
 
+        self._guard_runtime_mutation()
         require_text("workflow error", error)
         with self._lock:
             record = self._workflow(workflow)
@@ -380,6 +427,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Publish an initial GPU allocation and its content mapping."""
 
+        self._guard_runtime_mutation()
         require_sha256("payload_digest", payload_digest)
         if replica_id.tier != Tier.GPU:
             raise IdentityError("initial replica must be on GPU")
@@ -483,7 +531,16 @@ class LifecycleOrchestrator:
     ) -> BindingHandle:
         """Attach one owner, optionally publishing a request execution map."""
 
+        self._guard_runtime_mutation()
         with self._lock:
+            if (
+                self._trace_required
+                and kind == BindingKind.REQUEST
+                and state == BindingState.REQUIRED
+            ):
+                raise StateTransitionError(
+                    "trace-required requests must bind as retained before service"
+                )
             existing = self._bindings.get(handle.binding_id)
             if existing is not None:
                 expected = (
@@ -623,6 +680,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Move a request binding between required and retained states."""
 
+        self._guard_runtime_mutation()
         if state in {BindingState.WAITING, BindingState.RELEASED}:
             raise StateTransitionError(
                 "waiting and released states require lifecycle-specific operations"
@@ -635,6 +693,10 @@ class LifecycleOrchestrator:
                 raise StateTransitionError("retention binding state is fixed")
             if binding.state == state:
                 return False
+            if self._trace_required and state == BindingState.REQUIRED:
+                raise StateTransitionError(
+                    "trace-required request mapping must pass the demand gate"
+                )
             mapping = self._mapping_for_binding(binding)
             drafts: list[EventDraft] = []
             new_mapping: tuple[str, ReplicaRecord, int] | None = None
@@ -716,6 +778,7 @@ class LifecycleOrchestrator:
     ) -> str:
         """Open a fresh TTL generation on a retention binding."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             binding = self._binding(handle)
             if not binding.active or binding.kind != BindingKind.WORKFLOW_RETENTION:
@@ -774,6 +837,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Close a lease using an exact owner-qualified terminal."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             binding = self._binding(handle)
             lease = self._lease_for_binding(lease_id, binding)
@@ -799,6 +863,7 @@ class LifecycleOrchestrator:
     def expire_leases(self, *, timestamp_ns: int) -> tuple[str, ...]:
         """Expire every active lease whose declared deadline has passed."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             due = sorted(
                 lease.lease_id
@@ -827,6 +892,7 @@ class LifecycleOrchestrator:
     ) -> TransferCommand | None:
         """Reserve CPU memory and schedule one GPU-to-CPU save."""
 
+        self._guard_runtime_mutation()
         if target_replica.tier != Tier.CPU:
             raise IdentityError("D2H target must be CPU")
         with self._lock:
@@ -874,33 +940,40 @@ class LifecycleOrchestrator:
         timestamp_ns: int,
         action: LedgerAction = LedgerAction.LOAD,
         reason: str = "owner_readmission",
+        demand_commit_id: str | None = None,
+        demand_committer: DemandCommitter | None = None,
     ) -> TransferCommand | None:
-        """Publish existing GPU residency or coalesce waiters on one H2D."""
+        """Publish residency or coalesce the logical consumers in this call.
 
+        A traced adapter uses a fresh demand commit ID for each new scheduled
+        access batch and reuses that ID only when retrying the same batch.
+        """
+
+        self._guard_runtime_mutation()
         if target_replica.tier != Tier.GPU:
             raise IdentityError("H2D target must be GPU")
         if action not in {LedgerAction.LOAD, LedgerAction.PREFETCH}:
             raise IdentityError("H2D action must be load or prefetch")
         with self._lock:
+            waiter_handles_tuple = tuple(waiter_handles)
             block = self._block(block_key)
-            waiters = self._validate_waiters(block_key, waiter_handles)
+            waiters = self._validate_waiters(block_key, waiter_handles_tuple)
             if action == LedgerAction.LOAD and not waiters:
                 raise StateTransitionError("load requires at least one waiter")
+            if (
+                self._trace_required
+                or demand_committer is not None
+                or demand_commit_id is not None
+            ) and timestamp_ns < self._ledger.last_timestamp_ns:
+                raise StateTransitionError("H2D timestamp predates ledger state")
             gpu = block.replicas.get(Tier.GPU)
             if gpu is not None:
                 if gpu.replica_id != target_replica:
                     raise StateTransitionError(
                         "requested target disagrees with live GPU"
                     )
-                self._publish_waiter_mappings(
-                    block,
-                    gpu,
-                    waiters,
-                    timestamp_ns=timestamp_ns,
-                    reason="gpu_fast_path",
-                )
-                return None
-            if block.inflight_transfer_id is not None:
+                self._validate_gpu_fast_path_waiters(gpu, waiters)
+            elif block.inflight_transfer_id is not None:
                 transfer = self._transfers[block.inflight_transfer_id]
                 if transfer.direction != TransferDirection.H2D:
                     raise StateTransitionError("D2H conflicts with requested H2D")
@@ -912,14 +985,145 @@ class LifecycleOrchestrator:
                     waiters,
                     existing_transfer=transfer,
                 )
+            else:
+                source = block.replicas.get(Tier.CPU)
+                if source is None:
+                    raise StateTransitionError("H2D source CPU replica is absent")
+                self._validate_h2d_waiter_preparation(waiters)
+                require_text("transfer_id", transfer_id)
+                if transfer_id in self._transfers:
+                    raise IdentityError(f"transfer ID already used: {transfer_id}")
+                self._validate_new_slot(target_replica)
+
+            trace_gate_enabled = (
+                self._trace_required
+                or demand_committer is not None
+                or demand_commit_id is not None
+            )
+            demand_signature: (
+                tuple[BlockKey, tuple[tuple[str, ExecutionRef], ...]] | None
+            ) = None
+            demand_waiters: tuple[OwnerBinding, ...] = ()
+            if waiters and trace_gate_enabled:
+                if demand_commit_id is None:
+                    raise StateTransitionError(
+                        "traced H2D waiters require a demand commit ID"
+                    )
+                require_text("demand_commit_id", demand_commit_id)
+                identified_waiters = tuple(
+                    (binding.binding_id, binding.execution_ref)
+                    for binding in sorted(waiters, key=lambda item: item.binding_id)
+                )
+                if any(
+                    execution_ref is None for _, execution_ref in identified_waiters
+                ):
+                    raise StateTransitionError("request waiter lost execution identity")
+                demand_signature = (
+                    block_key,
+                    tuple(
+                        (binding_id, execution_ref)
+                        for binding_id, execution_ref in identified_waiters
+                        if execution_ref is not None
+                    ),
+                )
+                prior_signature = self._committed_demand_ids.get(demand_commit_id)
+                if prior_signature is None:
+                    conflicting_id = next(
+                        (
+                            self._demand_id_by_execution[execution_ref]
+                            for _, execution_ref in demand_signature[1]
+                            if execution_ref in self._demand_id_by_execution
+                            and self._demand_id_by_execution[execution_ref]
+                            != demand_commit_id
+                        ),
+                        None,
+                    )
+                    if conflicting_id is not None:
+                        raise IdentityError(
+                            "request execution already has another demand commit ID"
+                        )
+                    self._validate_fresh_demand_waiters(block, waiters)
+                    demand_waiters = waiters
+                elif prior_signature != demand_signature:
+                    raise IdentityError(
+                        "demand commit ID was reused for another logical demand"
+                    )
+            elif not waiters and (
+                demand_committer is not None or demand_commit_id is not None
+            ):
+                raise StateTransitionError(
+                    "demand commit requires at least one request waiter"
+                )
+
+            if demand_waiters:
+                if demand_committer is None:
+                    raise StateTransitionError(
+                        "trace-required H2D waiters need a durable demand commit"
+                    )
+                assert demand_commit_id is not None
+                assert demand_signature is not None
+                demand_view = self._pre_service_demand_view_locked(
+                    block,
+                    demand_commit_id=demand_commit_id,
+                    target_replica=target_replica,
+                    action=action,
+                    transfer_id=transfer_id,
+                    timestamp_ns=timestamp_ns,
+                    waiters=demand_waiters,
+                )
+                if self._trace_callback_active:
+                    raise StateTransitionError(
+                        "trace committer callback cannot reenter"
+                    )
+                self._trace_callback_active = True
+                try:
+                    receipt = demand_committer.commit_demands(demand_view)
+                finally:
+                    self._trace_callback_active = False
+                current = self._pre_service_demand_view_locked(
+                    self._block(block_key),
+                    demand_commit_id=demand_commit_id,
+                    target_replica=target_replica,
+                    action=action,
+                    transfer_id=transfer_id,
+                    timestamp_ns=timestamp_ns,
+                    waiters=self._validate_waiters(
+                        block_key,
+                        waiter_handles_tuple,
+                    ),
+                )
+                if current != demand_view:
+                    raise StateTransitionError(
+                        "demand committer changed the pre-service runtime view"
+                    )
+                self._validate_trace_receipt(
+                    receipt,
+                    event_count=demand_view.runtime_event_count,
+                    view_digest=demand_view.view_digest,
+                )
+                self._committed_demand_ids[demand_commit_id] = demand_signature
+                for _, execution_ref in demand_signature[1]:
+                    self._demand_id_by_execution[execution_ref] = demand_commit_id
+
+            if gpu is not None:
+                self._publish_waiter_mappings(
+                    block,
+                    gpu,
+                    waiters,
+                    timestamp_ns=timestamp_ns,
+                    reason="gpu_fast_path",
+                )
+                return None
+            if block.inflight_transfer_id is not None:
+                transfer = self._transfers[block.inflight_transfer_id]
                 for binding in waiters:
                     self._prepare_waiter(binding)
                     transfer.waiter_binding_ids.add(binding.binding_id)
+                    self._transfer_waiter_history.add(binding.binding_id)
                 return self._transfer_command(transfer)
             source = block.replicas.get(Tier.CPU)
-            if source is None:
-                raise StateTransitionError("H2D source CPU replica is absent")
-            self._validate_h2d_waiter_preparation(waiters)
+            if source is None:  # pragma: no cover - protected by locked preflight
+                raise StateTransitionError("H2D source disappeared after preflight")
             command = self._schedule_transfer(
                 block,
                 source,
@@ -945,6 +1149,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Validate and atomically publish one completed physical transfer."""
 
+        self._guard_runtime_mutation()
         require_sha256("observed_digest", observed_digest)
         with self._lock:
             transfer = self._transfer(transfer_id)
@@ -995,6 +1200,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Record a worker-reported failure and release its target reservation."""
 
+        self._guard_runtime_mutation()
         require_text("transfer error", error)
         with self._lock:
             transfer = self._transfer(transfer_id)
@@ -1032,6 +1238,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Cancel one transfer while preserving its exact observed progress."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             transfer = self._transfer(transfer_id)
             if not transfer.active:
@@ -1068,6 +1275,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Close an explicitly versioned GPU allocation after owners detach."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             block = self._block(block_key)
             gpu = block.replicas.get(Tier.GPU)
@@ -1144,6 +1352,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Release one owner after validating its full caller capability."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             binding = self._binding(handle)
             if not binding.active:
@@ -1168,6 +1377,7 @@ class LifecycleOrchestrator:
     ) -> bool:
         """Release an explicitly versioned replica set after all edges close."""
 
+        self._guard_runtime_mutation()
         with self._lock:
             block = self._block(block_key)
             if block.reclaimed:
@@ -1339,6 +1549,88 @@ class LifecycleOrchestrator:
                 live_replicas=self._live_replica_count(),
                 reservations=len(self._reservations),
                 inflight_transfers=len(active_transfers),
+            )
+
+    def _shared_lease_policy_snapshot_locked(
+        self,
+        key: BlockKey,
+        *,
+        runtime_event_count: int,
+    ) -> SharedLeasePolicySnapshot:
+        block = self._block(key)
+        owners: list[LeaseOwnerSnapshot] = []
+        for binding_id in sorted(block.binding_ids):
+            binding = self._bindings[binding_id]
+            if not binding.active or binding.kind != BindingKind.WORKFLOW_RETENTION:
+                continue
+            workflow = self._workflow(binding.workflow)
+            eligible_node_ids = tuple(
+                sorted(
+                    node.node_id
+                    for node in workflow.nodes.values()
+                    if node.status
+                    in {NodeStatus.PENDING, NodeStatus.READY, NodeStatus.RUNNING}
+                )
+            )
+            owners.append(
+                LeaseOwnerSnapshot(
+                    binding_id=binding.binding_id,
+                    workflow=binding.workflow,
+                    created_ns=binding.created_ns,
+                    eligible_node_ids=eligible_node_ids,
+                )
+            )
+        return SharedLeasePolicySnapshot(
+            block_key=key,
+            runtime_event_count=runtime_event_count,
+            location_version=block.location_version,
+            residency=block.residency,
+            owners=tuple(owners),
+        )
+
+    def _atomic_cutoff_view_locked(
+        self,
+        key: BlockKey,
+        *,
+        cutoff_ns: int,
+        horizon_duration_ns: int,
+    ) -> AtomicCutoffView:
+        lifecycle_prefix = self._ledger.events
+        snapshot = self._shared_lease_policy_snapshot_locked(
+            key,
+            runtime_event_count=len(lifecycle_prefix),
+        )
+        owner_workflows = sorted({owner.workflow for owner in snapshot.owners})
+        owner_specs = tuple(
+            deepcopy(self._workflow(workflow).spec) for workflow in owner_workflows
+        )
+        return AtomicCutoffView(
+            snapshot=snapshot,
+            owner_specs=owner_specs,
+            lifecycle_prefix=lifecycle_prefix,
+            cutoff_ns=cutoff_ns,
+            horizon_duration_ns=horizon_duration_ns,
+            deadline_ns=cutoff_ns + horizon_duration_ns,
+        )
+
+    @staticmethod
+    def _validate_trace_receipt(
+        receipt: DurableCommitReceipt,
+        *,
+        event_count: int,
+        view_digest: str,
+    ) -> None:
+        if not isinstance(receipt, DurableCommitReceipt):
+            raise StateTransitionError("trace committer returned an invalid receipt")
+        if receipt.event_count != event_count:
+            raise StateTransitionError("trace receipt event count differs from runtime")
+        if receipt.view_digest != view_digest:
+            raise StateTransitionError("trace receipt view digest differs from runtime")
+
+    def _guard_runtime_mutation(self) -> None:
+        if self._trace_callback_active:
+            raise StateTransitionError(
+                "runtime mutation from a trace committer callback is forbidden"
             )
 
     def _workflow(self, key: WorkflowKey) -> WorkflowRecord:
@@ -1643,6 +1935,102 @@ class LifecycleOrchestrator:
         if active:
             raise StateTransitionError(f"active leases protect the block: {active}")
 
+    def _pre_service_demand_view_locked(
+        self,
+        block: BlockRecord,
+        *,
+        demand_commit_id: str,
+        target_replica: ReplicaId,
+        action: LedgerAction,
+        transfer_id: str,
+        timestamp_ns: int,
+        waiters: tuple[OwnerBinding, ...],
+    ) -> PreServiceDemandView:
+        lifecycle_prefix = self._ledger.events
+        last_event = lifecycle_prefix[-1] if lifecycle_prefix else None
+        waiter_identities: list[WaiterIdentity] = []
+        for binding in sorted(waiters, key=lambda item: item.binding_id):
+            if binding.execution_ref is None:
+                raise StateTransitionError("request waiter lost execution identity")
+            waiter_identities.append(
+                WaiterIdentity(
+                    binding_id=binding.binding_id,
+                    workflow=binding.workflow,
+                    request_id=binding.request_id,
+                    node_id=binding.node_id,
+                    execution_ref=binding.execution_ref,
+                    state=binding.state,
+                )
+            )
+        return PreServiceDemandView(
+            block_key=block.block_key,
+            demand_commit_id=demand_commit_id,
+            target_replica=target_replica,
+            action=action,
+            transfer_id=transfer_id,
+            timestamp_ns=timestamp_ns,
+            lifecycle_prefix=lifecycle_prefix,
+            runtime_event_count=len(lifecycle_prefix),
+            last_event_id=last_event.event_id if last_event is not None else None,
+            last_event_timestamp_ns=(
+                last_event.timestamp_ns if last_event is not None else None
+            ),
+            location_version=block.location_version,
+            residency=block.residency,
+            waiters=tuple(waiter_identities),
+        )
+
+    def _validate_gpu_fast_path_waiters(
+        self,
+        gpu: ReplicaRecord,
+        waiters: tuple[OwnerBinding, ...],
+    ) -> None:
+        for binding in waiters:
+            mapping = self._mapping_for_binding(binding)
+            if mapping is not None:
+                if mapping.gpu_replica != gpu.replica_id:
+                    raise StateTransitionError("waiter maps a stale GPU generation")
+                if binding.state != BindingState.REQUIRED:
+                    raise StateTransitionError(
+                        "mapped GPU fast-path waiter is not required"
+                    )
+            elif binding.state != BindingState.RETAINED:
+                raise StateTransitionError(
+                    f"invalid GPU fast-path waiter state: {binding.state.value}"
+                )
+
+    def _validate_fresh_demand_waiters(
+        self,
+        block: BlockRecord,
+        waiters: tuple[OwnerBinding, ...],
+    ) -> None:
+        active_transfer_waiters: set[str] = set()
+        if block.inflight_transfer_id is not None:
+            transfer = self._transfers[block.inflight_transfer_id]
+            if transfer.active:
+                active_transfer_waiters = transfer.waiter_binding_ids
+        for binding in waiters:
+            if binding.state != BindingState.RETAINED:
+                raise StateTransitionError(
+                    "fresh demand waiter must be retained before service"
+                )
+            if self._mapping_for_binding(binding) is not None:
+                raise StateTransitionError(
+                    "fresh demand waiter already has an execution map"
+                )
+            if binding.binding_id in active_transfer_waiters:
+                raise StateTransitionError(
+                    "fresh demand waiter already belongs to an active transfer"
+                )
+            if binding.binding_id in self._execution_mapping_generations:
+                raise StateTransitionError(
+                    "fresh demand waiter has prior execution-map history"
+                )
+            if binding.binding_id in self._transfer_waiter_history:
+                raise StateTransitionError(
+                    "fresh demand waiter has prior transfer-service history"
+                )
+
     def _validate_waiters(
         self,
         block_key: BlockKey,
@@ -1837,6 +2225,7 @@ class LifecycleOrchestrator:
         )
         self._reservations[target_replica] = reservation
         self._transfers[transfer_id] = transfer
+        self._transfer_waiter_history.update(transfer.waiter_binding_ids)
         block.inflight_transfer_id = transfer_id
         block.inflight_direction = direction
         self._occupy_new_slot(target_replica)

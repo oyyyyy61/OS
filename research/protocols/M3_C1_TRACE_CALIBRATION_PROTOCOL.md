@@ -525,3 +525,23 @@ rule passes.
   repository regression pass; no probability or performance claim.
 - Pilot entry command and runtime root remain open until C1-B0/B1 evidence is
   sealed from a clean committed source snapshot.
+
+### Implementation Checkpoint: 2026-07-27
+
+The first C1-B foundation slice now implements the closed trace record model,
+canonical JSONL parser, structural state machine, content-addressed lifecycle
+and schedule evidence-gate interfaces, atomic cutoff view, and pre-service
+demand gate. A stable `demand_commit_id` distinguishes a retry of one scheduled
+access batch from a new resident or H2D demand; the adapter must pass only the
+new logical consumers introduced by that invocation.
+
+This checkpoint is not C1-B0 or C1-B1 acceptance. The concrete lifecycle
+sidecar verifier, schedule replay verifier, branch-grammar artifact validator,
+segmented create-only commit chain and final seal, split-component builder, and
+feature-leakage audit remain open gates. A typed adapter that constructs the
+operation-specific canonical record batch, commits it through the durable
+writer, and returns the writer-issued receipt also remains an open integration
+gate; a synthetic protocol receipt cannot support a durability claim. The
+current single-file writer is a component implementation: any process or I/O
+failure invalidates the entire stream, which must never be resumed or used for
+a formal label.
