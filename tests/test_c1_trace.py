@@ -326,9 +326,14 @@ def _trace(
                 producer_id="scheduler-1",
                 producer_artifact_digest=_digest("scheduler"),
                 schedule_digest=_digest("schedule"),
+                checkpoint_id="checkpoint-1",
+                checkpoint_digest=_digest("checkpoint-1"),
                 consumed_event_count=1,
                 last_schedule_event_id="schedule-event-1",
                 max_closed_timestamp_ns=31,
+                event_prefix_digest=_digest("schedule-event-prefix"),
+                closed_epoch_count=int(service != "none"),
+                epoch_prefix_digest=_digest("schedule-epoch-prefix"),
             ),
             parent=previous.record_id,
             observation_id="observation-1",
@@ -380,6 +385,17 @@ def test_predicted_trace_round_trip_and_reconstructs_resident_demand(
     assert parsed == records
     assert reconstruct_demand_label(validated, "observation-1").first_demand == 1
     assert reconstruct_demand_label(validated, "observation-1").epoch_count == 1
+
+
+def test_foundation_v1_trace_is_not_reinterpreted_as_v2(block_key: BlockKey) -> None:
+    header = _trace(block_key)[0]
+    raw = encode_trace_record(header).replace(
+        b"dagkv.m3.c1_trace.v2",
+        b"dagkv.m3.c1_trace.v1",
+    )
+
+    with pytest.raises(TraceValidationError, match="unsupported.*schema"):
+        parse_trace_record(raw)
 
 
 def test_failed_h2d_remains_positive_demand(block_key: BlockKey) -> None:

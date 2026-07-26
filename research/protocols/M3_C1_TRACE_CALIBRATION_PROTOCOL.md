@@ -1,15 +1,23 @@
-# M3/C1-B Trace And Calibration Protocol v1
+# M3/C1-B Trace And Calibration Protocol v2
 
 ## Material Passport
 
 - Origin skill: Academic Research Suite `experiment-agent`
 - Origin mode: plan
 - Origin date: 2026-07-26
-- Verification status: `STRUCTURAL_PROTOCOL_FROZEN`; numerical preregistration open
-- Version label: `m3_c1b_trace_calibration_v1`
+- Pre-data amendment date: 2026-07-27
+- Verification status: `STRUCTURAL_PROTOCOL_V2_FROZEN`; numerical preregistration open
+- Version label: `m3_c1b_trace_calibration_v2`
+- Supersedes: v1 at Git commit
+  `887fc2e547eabdee987d6afbd474d78a86fff8ba`
 
 The Git commit that first contains this version is its structural freeze
 identity. Numerical thresholds require a separate post-pilot preregistration.
+V2 was amended before excluded-pilot or formal C1-B data collection because
+the first implementation audit found that v1 did not bind exact schedule
+checkpoint prefixes and conflated normalized schedule-event count with natural
+source EOF count. V1 remains an immutable historical protocol and cannot govern
+new traces or labels.
 
 ## Status And Claim Boundary
 
@@ -103,7 +111,7 @@ measures and cannot increase the sample count.
 
 ## Trace Record Contract
 
-Schema `dagkv.m3.c1_trace.v1` is an append-only canonical JSONL stream. Every
+Schema `dagkv.m3.c1_trace.v2` is an append-only canonical JSONL stream. Every
 row has an exact closed field set containing `schema_version`, `record_type`,
 `trace_id`, `run_id`, `schedule_id`, `schedule_case_id`, `sequence`,
 `record_id`, `parent_record_id`, and a type-specific payload. Observation rows
@@ -131,6 +139,57 @@ serializes every `LifecycleEvent` in ledger-sequence order, including nested
 canonical block identity with a physical slot. Both headers bind one
 `trace_pair_id`; the create-only evidence manifest binds their final file
 digests without rewriting either stream.
+
+A separate canonical artifact with schema `dagkv.m3.schedule_sidecar.v1`
+binds one trace pair, run, source artifact, schedule, and schedule case before
+labels are available. It contains the exogenous demand events, the
+preregistered reuse epoch partition, content-addressed closed-time checkpoints,
+and a typed replay or sealed-natural-source closure. Event ordinal is
+contiguous and events are ordered by `(scheduled_access_ns, event_ordinal)`.
+Every event belongs to exactly one epoch; checkpoint event and epoch counts,
+last event identity, and
+canonical JSONL prefix digests are recomputed from the artifact. The trace
+header binds the exact schedule file digest. A watermark additionally binds
+one checkpoint ID, its canonical digest, both prefix digests, both counts, and
+the producer identity. Copying scalar count/time fields without the referenced
+checkpoint cannot establish completeness.
+
+All schedule, cutoff, deadline, checkpoint, capture, and label-availability
+timestamps use the exact clock domain `campaign_monotonic_ns`. An unknown or
+different clock domain fails schema validation before any interval comparison.
+
+For replay, the sidecar contains the finite sealed producer plan and its closure
+conserves the declared event count and event-stream digest; the watermark's
+`producer_artifact_digest` equals that plan-event digest. For a natural source,
+normalized schedule-event count and raw source EOF record count are different
+quantities and cannot be equated. The natural closure separately binds raw EOF
+count/digest, capture interval, dropped-record count, and clean EOF state, and
+the watermark's producer digest equals the raw EOF digest. A complete natural
+observation requires clean EOF, zero dropped records, and a capture interval
+covering its cutoff and referenced checkpoint. Every topology source-case
+digest in the paired trace must equal the schedule sidecar source case. The
+concrete natural-source gate independently reads a stable, singly linked source
+artifact, verifies its complete-file EOF digest and record count, and requires
+every normalized demand event's source-record digest to occur in that sealed
+source. Its `source_artifact_digest` must equal the trace header source digest;
+for a natural schedule it must also equal the sealed source EOF digest. A
+sidecar that only self-reports these values cannot authorize labels.
+
+The schedule-sidecar v1 concrete gate parses natural closure metadata and
+audits source-file integrity, but it does not yet authorize a `COMPLETE`
+natural-source label. A
+source-schema-specific total normalizer must additionally prove that every
+eligible raw source row maps to exactly one schedule event or a typed non-demand
+row. One-way proof that each emitted event occurs in the source cannot prove
+that an eligible demand was not omitted, especially for a zero-demand label.
+Until that total normalizer is frozen and implemented, natural observations
+fail closed; the controlled replay path is the C1-B pilot/formal lane.
+
+Trace schema v2 supersedes the initial foundation-only v1 because checkpoint
+and prefix-digest watermark fields, zero-event checkpoint semantics, and the
+separate natural-source EOF fields are required and byte-incompatible. Existing
+v1 files retain their historical identity and are diagnostic only; they cannot
+be reinterpreted or admitted to a v2 label gate.
 
 The observation state machine is:
 
@@ -228,6 +287,16 @@ schedule. A replay scheduler emits it only after consuming every declared event
 through its closed timestamp. A sealed natural-trace source uses its immutable
 EOF, record count, and digest as the producer terminal. A lifecycle event count
 or a quiet wall-clock interval cannot substitute for this watermark.
+
+The independent schedule verifier selects every eligible artifact event in the
+half-open/closed primary window `(cutoff_ns, deadline_ns]` and requires an exact
+bijection to trace `demand_intent` rows over schedule event, access time, claim,
+retention owner, request binding, workflow, node, execution, block, and reuse
+epoch identities. The artifact epoch partition must then map bijectively to
+trace `reuse_epoch` rows. A reference epoch that only partly intersects one
+observation's eligible event set is ambiguous and fails closed. A zero-demand
+label is authorized only when this independently reconstructed event and epoch
+set is empty under a checkpoint strictly beyond the deadline.
 
 Timestamped owner cancellation and workflow termination are realized outcomes,
 not censoring. Missing cancellation, trace truncation, instrumentation failure,
@@ -545,3 +614,14 @@ gate; a synthetic protocol receipt cannot support a durability claim. The
 current single-file writer is a component implementation: any process or I/O
 failure invalidates the entire stream, which must never be resumed or used for
 a formal label.
+
+The second foundation slice implements the closed schedule sidecar, canonical
+create-only writer/loader, replay and natural-source closure types, exact
+checkpoint-prefix binding, and an independent demand-intent/reuse-epoch
+bijection verifier. Replay labels may pass this gate. Natural closure/source
+integrity is audited, while natural labels remain closed pending a total source
+normalizer. The lifecycle sidecar remains diagnostic until the event
+contract records atomic batch boundaries, block after-state/location version,
+binding state transitions, and exact H2D waiter membership. No lifecycle
+receipt for a complete formal observation may be issued from the older event
+schema.

@@ -571,27 +571,41 @@ def test_h2d_waiter_set_contains_the_request_binding(block_key: BlockKey) -> Non
         validate_trace(tuple(records))
 
 
-def test_natural_watermark_consumed_count_equals_eof_count(
+def test_natural_watermark_separates_schedule_count_from_source_eof_count(
     block_key: BlockKey,
 ) -> None:
     records = list(_valid_trace(block_key, service="none"))
     watermark = records[-2]
     assert isinstance(watermark.payload, ReplayScheduleWatermarkPayload)
-    with pytest.raises(TraceValidationError, match="consumed.*EOF|EOF.*count"):
-        records[-2] = replace(
-            watermark,
-            payload=NaturalTraceWatermarkPayload(
-                producer_kind=ScheduleProducerKind.SEALED_NATURAL_TRACE,
-                producer_id=watermark.payload.producer_id,
-                producer_artifact_digest=watermark.payload.producer_artifact_digest,
-                schedule_digest=watermark.payload.schedule_digest,
-                consumed_event_count=watermark.payload.consumed_event_count,
-                last_schedule_event_id=watermark.payload.last_schedule_event_id,
-                max_closed_timestamp_ns=watermark.payload.max_closed_timestamp_ns,
-                eof_record_count=watermark.payload.consumed_event_count + 1,
-                eof_digest=_digest("natural-eof"),
-            ),
-        )
+    records[-2] = replace(
+        watermark,
+        payload=NaturalTraceWatermarkPayload(
+            producer_kind=ScheduleProducerKind.SEALED_NATURAL_TRACE,
+            producer_id=watermark.payload.producer_id,
+            producer_artifact_digest=watermark.payload.producer_artifact_digest,
+            schedule_digest=watermark.payload.schedule_digest,
+            checkpoint_id=watermark.payload.checkpoint_id,
+            checkpoint_digest=watermark.payload.checkpoint_digest,
+            consumed_event_count=watermark.payload.consumed_event_count,
+            last_schedule_event_id=watermark.payload.last_schedule_event_id,
+            max_closed_timestamp_ns=watermark.payload.max_closed_timestamp_ns,
+            event_prefix_digest=watermark.payload.event_prefix_digest,
+            closed_epoch_count=watermark.payload.closed_epoch_count,
+            epoch_prefix_digest=watermark.payload.epoch_prefix_digest,
+            source_eof_record_count=watermark.payload.consumed_event_count + 7,
+            source_eof_digest=_digest("natural-eof"),
+            capture_start_ns=0,
+            capture_end_ns=31,
+            dropped_record_count=0,
+            clean_eof=True,
+        ),
+    )
+
+    validated = validate_trace(tuple(records))
+    natural = validated.observations[0].watermark
+    assert natural is not None
+    assert isinstance(natural.payload, NaturalTraceWatermarkPayload)
+    assert natural.payload.source_eof_record_count == 8
 
 
 def test_writer_rejects_concurrent_append(

@@ -38,7 +38,7 @@ from dagkv.domain import (
     require_text,
 )
 
-TRACE_SCHEMA_VERSION = "dagkv.m3.c1_trace.v1"
+TRACE_SCHEMA_VERSION = "dagkv.m3.c1_trace.v2"
 MAX_TRACE_BYTES = 64 * 1024 * 1024
 MAX_TRACE_LINE_BYTES = 4 * 1024 * 1024
 
@@ -528,9 +528,14 @@ class ReplayScheduleWatermarkPayload:
     producer_id: str
     producer_artifact_digest: str
     schedule_digest: str
+    checkpoint_id: str
+    checkpoint_digest: str
     consumed_event_count: int
-    last_schedule_event_id: str
+    last_schedule_event_id: str | None
     max_closed_timestamp_ns: int
+    event_prefix_digest: str
+    closed_epoch_count: int
+    epoch_prefix_digest: str
 
     def __post_init__(self) -> None:
         _require_enum(
@@ -541,9 +546,18 @@ class ReplayScheduleWatermarkPayload:
         require_text("producer_id", self.producer_id)
         require_sha256("producer_artifact_digest", self.producer_artifact_digest)
         require_sha256("schedule_digest", self.schedule_digest)
-        _require_int("consumed_event_count", self.consumed_event_count, minimum=1)
-        require_text("last_schedule_event_id", self.last_schedule_event_id)
+        require_text("checkpoint_id", self.checkpoint_id)
+        require_sha256("checkpoint_digest", self.checkpoint_digest)
+        _require_int("consumed_event_count", self.consumed_event_count)
+        if self.consumed_event_count == 0:
+            if self.last_schedule_event_id is not None:
+                raise TraceValidationError("empty schedule prefix has a last event")
+        else:
+            require_text("last_schedule_event_id", self.last_schedule_event_id)
         _require_int("max_closed_timestamp_ns", self.max_closed_timestamp_ns)
+        require_sha256("event_prefix_digest", self.event_prefix_digest)
+        _require_int("closed_epoch_count", self.closed_epoch_count)
+        require_sha256("epoch_prefix_digest", self.epoch_prefix_digest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,11 +566,20 @@ class NaturalTraceWatermarkPayload:
     producer_id: str
     producer_artifact_digest: str
     schedule_digest: str
+    checkpoint_id: str
+    checkpoint_digest: str
     consumed_event_count: int
-    last_schedule_event_id: str
+    last_schedule_event_id: str | None
     max_closed_timestamp_ns: int
-    eof_record_count: int
-    eof_digest: str
+    event_prefix_digest: str
+    closed_epoch_count: int
+    epoch_prefix_digest: str
+    source_eof_record_count: int
+    source_eof_digest: str
+    capture_start_ns: int
+    capture_end_ns: int
+    dropped_record_count: int
+    clean_eof: bool
 
     def __post_init__(self) -> None:
         _require_enum(
@@ -567,15 +590,27 @@ class NaturalTraceWatermarkPayload:
         require_text("producer_id", self.producer_id)
         require_sha256("producer_artifact_digest", self.producer_artifact_digest)
         require_sha256("schedule_digest", self.schedule_digest)
-        _require_int("consumed_event_count", self.consumed_event_count, minimum=1)
-        require_text("last_schedule_event_id", self.last_schedule_event_id)
+        require_text("checkpoint_id", self.checkpoint_id)
+        require_sha256("checkpoint_digest", self.checkpoint_digest)
+        _require_int("consumed_event_count", self.consumed_event_count)
+        if self.consumed_event_count == 0:
+            if self.last_schedule_event_id is not None:
+                raise TraceValidationError("empty schedule prefix has a last event")
+        else:
+            require_text("last_schedule_event_id", self.last_schedule_event_id)
         _require_int("max_closed_timestamp_ns", self.max_closed_timestamp_ns)
-        _require_int("eof_record_count", self.eof_record_count, minimum=1)
-        if self.consumed_event_count != self.eof_record_count:
-            raise TraceValidationError(
-                "natural watermark consumed count differs from sealed EOF"
-            )
-        require_sha256("eof_digest", self.eof_digest)
+        require_sha256("event_prefix_digest", self.event_prefix_digest)
+        _require_int("closed_epoch_count", self.closed_epoch_count)
+        require_sha256("epoch_prefix_digest", self.epoch_prefix_digest)
+        _require_int("source_eof_record_count", self.source_eof_record_count)
+        require_sha256("source_eof_digest", self.source_eof_digest)
+        _require_int("capture_start_ns", self.capture_start_ns)
+        _require_int("capture_end_ns", self.capture_end_ns)
+        if self.capture_end_ns < self.capture_start_ns:
+            raise TraceValidationError("natural capture interval regresses")
+        _require_int("dropped_record_count", self.dropped_record_count)
+        if type(self.clean_eof) is not bool:
+            raise TraceValidationError("clean_eof must be a bool")
 
 
 ScheduleWatermarkPayload = ReplayScheduleWatermarkPayload | NaturalTraceWatermarkPayload
@@ -1008,13 +1043,21 @@ def encode_trace_record(record: TraceRecord) -> bytes:
     return canonical_json(record)
 
 
-def parse_trace_record(raw: bytes) -> TraceRecord:
-    """Parse one exact canonical trace record without a line terminator."""
+def parse_canonical_dataclass[T](
+    raw: bytes,
+    expected: type[T],
+    *,
+    artifact_name: str,
+    max_bytes: int,
+) -> T:
+    """Parse one exact closed dataclass from canonical JSON bytes."""
 
-    if not raw or len(raw) > MAX_TRACE_LINE_BYTES:
-        raise TraceValidationError("trace record has an invalid size")
+    require_text("artifact_name", artifact_name)
+    _require_int("max_bytes", max_bytes, minimum=1)
+    if not raw or len(raw) > max_bytes:
+        raise TraceValidationError(f"{artifact_name} has an invalid size")
     if raw.startswith(b"\xef\xbb\xbf") or b"\r" in raw or b"\n" in raw:
-        raise TraceValidationError("trace record framing is not canonical")
+        raise TraceValidationError(f"{artifact_name} framing is not canonical")
     try:
         text = raw.decode("utf-8", errors="strict")
         value = json.loads(
@@ -1024,17 +1067,28 @@ def parse_trace_record(raw: bytes) -> TraceRecord:
             parse_constant=_reject_constant,
         )
     except UnicodeDecodeError as exc:
-        raise TraceValidationError("trace record is not valid UTF-8") from exc
+        raise TraceValidationError(f"{artifact_name} is not valid UTF-8") from exc
     except json.JSONDecodeError as exc:
-        raise TraceValidationError(f"trace record is invalid JSON: {exc}") from exc
+        raise TraceValidationError(f"{artifact_name} is invalid JSON: {exc}") from exc
     except TraceValidationError:
         raise
     except (RecursionError, ValueError) as exc:
-        raise TraceValidationError("trace record exceeds parser limits") from exc
-    record = _decode_dataclass(TraceRecord, value, path="record")
-    if encode_trace_record(record) != raw:
-        raise TraceValidationError("trace record bytes are not canonical")
-    return record
+        raise TraceValidationError(f"{artifact_name} exceeds parser limits") from exc
+    decoded = _decode_dataclass(expected, value, path=artifact_name)
+    if canonical_json(decoded) != raw:
+        raise TraceValidationError(f"{artifact_name} bytes are not canonical")
+    return decoded
+
+
+def parse_trace_record(raw: bytes) -> TraceRecord:
+    """Parse one exact canonical trace record without a line terminator."""
+
+    return parse_canonical_dataclass(
+        raw,
+        TraceRecord,
+        artifact_name="trace record",
+        max_bytes=MAX_TRACE_LINE_BYTES,
+    )
 
 
 @dataclass(frozen=True, slots=True)
