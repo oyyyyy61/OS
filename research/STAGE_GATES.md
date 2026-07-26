@@ -82,12 +82,40 @@ eligible overlap, and 23 current external files. Its create-only output passed
 a fresh independent replay, closing M2 for correctness only. No v2 sample or
 tolerance contributes to this item-8 or aggregate decision.
 
-## M3-M6
+## M3: Policy Mechanisms
 
-- **M3:** dependence-correct probabilistic shared leases (C1), an explicitly
-  derived capacity/DMA-constrained joint controller (C2), and deadline-aware
-  partial-prefix single-flight (C3), each behind independent switches, matched
-  first-order baselines, and fault tests.
+Status: **C1_A_IMPLEMENTED_UNSEALED**. C2 and C3 have not started.
+
+The normative C1 boundary and later experiment gates are frozen in
+`research/protocols/M3_C1_SHARED_LEASE_PROTOCOL.md`. The current component:
+
+- binds every forecast to an immutable block snapshot and exact ledger event
+  count;
+- represents mutually exclusive and correlated outcomes jointly and permits
+  multiplication only across declared-independent groups;
+- deduplicates concurrent fanout into one physical reuse epoch;
+- separates first physical re-admission probability, expected unique epochs,
+  and expected repeats;
+- computes exact PPM nominal values and sound total-variation drift bounds;
+- rejects stale, cross-owner, ineligible-node, identity-drift, invalid-mass,
+  and online-oracle inputs;
+- exposes C1 nominal, C1 robust-lower, a PBKV-style additive proxy, and
+  independent-union modes for matched attribution.
+
+Sixteen focused C1 tests and the full 331-test repository regression pass. This
+is implementation evidence only. C1-A remains unsealed until a clean committed
+source snapshot, JUnit, checksums, aggregate M2 historical replay, and an
+independent component replay are frozen. C1-B trace/calibration, C1-C paired
+policy replay, and C1-D real-GPU gates remain open. No C1 performance or
+novelty claim is authorized.
+
+M3 must additionally implement an explicitly derived capacity/DMA-constrained
+joint controller (C2) and deadline-aware partial-prefix single-flight (C3).
+Each mechanism requires an independent switch, matched first-order baselines,
+and fault tests.
+
+## M4-M6
+
 - **M4:** trace provenance, field audit, split policy, and leakage review.
 - **M5:** preregistered paired matrix with immutable schedules and raw outputs.
 - **M6:** claim-to-evidence audit, paper tables, artifact reconstruction, and

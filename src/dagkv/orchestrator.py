@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from threading import RLock
 
+from dagkv.c1_leases import LeaseOwnerSnapshot, SharedLeasePolicySnapshot
 from dagkv.domain import (
     AuditReport,
     BindingHandle,
@@ -119,6 +120,44 @@ class LifecycleOrchestrator:
                 return deepcopy(self._transfers[transfer_id])
             except KeyError as exc:
                 raise IdentityError(f"unknown transfer: {transfer_id}") from exc
+
+    def shared_lease_policy_snapshot(
+        self,
+        key: BlockKey,
+    ) -> SharedLeasePolicySnapshot:
+        """Project active retention owners into an immutable C1 input."""
+
+        with self._lock:
+            block = self._block(key)
+            owners: list[LeaseOwnerSnapshot] = []
+            for binding_id in sorted(block.binding_ids):
+                binding = self._bindings[binding_id]
+                if not binding.active or binding.kind != BindingKind.WORKFLOW_RETENTION:
+                    continue
+                workflow = self._workflow(binding.workflow)
+                eligible_node_ids = tuple(
+                    sorted(
+                        node.node_id
+                        for node in workflow.nodes.values()
+                        if node.status
+                        in {NodeStatus.PENDING, NodeStatus.READY, NodeStatus.RUNNING}
+                    )
+                )
+                owners.append(
+                    LeaseOwnerSnapshot(
+                        binding_id=binding.binding_id,
+                        workflow=binding.workflow,
+                        created_ns=binding.created_ns,
+                        eligible_node_ids=eligible_node_ids,
+                    )
+                )
+            return SharedLeasePolicySnapshot(
+                block_key=key,
+                runtime_event_count=len(self._ledger.events),
+                location_version=block.location_version,
+                residency=block.residency,
+                owners=tuple(owners),
+            )
 
     def register_workflow(self, spec: WorkflowSpec) -> bool:
         """Register one immutable DAG, initializing roots as ready."""

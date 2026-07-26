@@ -110,6 +110,24 @@ Policy scoring will consume immutable snapshots. It cannot mutate residency or
 ownership directly. Engine adapters execute commands and report terminals back
 to the orchestrator.
 
+## M3 Policy Projection
+
+`LifecycleOrchestrator.shared_lease_policy_snapshot()` projects one block,
+its exact ledger event count, location version, residency, and active retention
+owners while holding the canonical writer lock. Request bindings are excluded.
+The detached snapshot contains no mutable runtime reference and grants no
+transition capability.
+
+`src/dagkv/c1_leases.py` consumes that projection with a forecast bound to the
+same block and event count. A later lifecycle event makes the forecast stale.
+The module represents correlation inside exhaustive joint-outcome groups and
+permits multiplication only between groups whose independence is declared in
+the forecast provenance. It deduplicates concurrent logical claims by physical
+reuse epoch, separates the first physical re-admission from repeats, and emits
+exact rational statistics plus sound total-variation bounds. The computation
+is read-only; owner-qualified M2 methods remain the only route to opening or
+closing a lease.
+
 ## Failure Model
 
 Unknown identity, conflicting generation, conflicting terminal replay, byte

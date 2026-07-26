@@ -82,6 +82,16 @@ Tokencake, Continuum, and PBKV already occupy generic DAG-aware offload,
 predictive upload, TTL retention, shared-node future-access scoring, and
 conservative prefetch.
 
+M3/C1 implementation work has started under
+`research/protocols/M3_C1_SHARED_LEASE_PROTOCOL.md`. The first component
+implements exact PPM joint-outcome aggregation, explicit independence groups,
+fanout coalescing, first-versus-repeated reuse statistics, total-variation
+drift bounds, an oracle information barrier, and snapshot-staleness rejection.
+It exposes PBKV-style additive and independent-marginal baselines behind
+separate modes. Sixteen focused tests and the complete 331-test repository
+regression pass. This is unsealed C1-A component evidence; trace calibration,
+paired policy effects, GPU performance, and every C1 paper claim remain open.
+
 ## Development
 
 ```bash

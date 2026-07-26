@@ -1,5 +1,20 @@
 """DAGKV canonical lifecycle runtime."""
 
+from dagkv.c1_leases import (
+    PROBABILITY_SCALE,
+    DependenceGroup,
+    ForecastSource,
+    JointOutcome,
+    LeaseOwnerSnapshot,
+    LeasePriorityMode,
+    MetricInterval,
+    ReuseClaim,
+    SharedLeaseForecast,
+    SharedLeasePoint,
+    SharedLeasePolicySnapshot,
+    SharedLeaseProfile,
+    aggregate_shared_lease,
+)
 from dagkv.domain import (
     AuditReport,
     BindingHandle,
@@ -31,6 +46,7 @@ from dagkv.engine_adapter import (
 from dagkv.orchestrator import LifecycleOrchestrator
 
 __all__ = [
+    "PROBABILITY_SCALE",
     "AuditReport",
     "BindingHandle",
     "BindingKind",
@@ -38,16 +54,27 @@ __all__ = [
     "BlockKey",
     "DAGKVError",
     "DMATerminalObservation",
+    "DependenceGroup",
     "EngineFingerprint",
     "ExecutionRef",
+    "ForecastSource",
     "IdentityError",
+    "JointOutcome",
+    "LeaseOwnerSnapshot",
+    "LeasePriorityMode",
     "LeaseState",
     "LifecycleOrchestrator",
+    "MetricInterval",
     "NodeStatus",
     "PhysicalEndpoint",
     "ReplicaId",
+    "ReuseClaim",
     "ResidencyState",
     "StateTransitionError",
+    "SharedLeaseForecast",
+    "SharedLeasePoint",
+    "SharedLeasePolicySnapshot",
+    "SharedLeaseProfile",
     "Tier",
     "TransferCommand",
     "TransferIntegrityError",
@@ -55,5 +82,6 @@ __all__ = [
     "WorkflowNode",
     "WorkflowSpec",
     "WorkflowStatus",
+    "aggregate_shared_lease",
     "commit_transfer_observation",
 ]
