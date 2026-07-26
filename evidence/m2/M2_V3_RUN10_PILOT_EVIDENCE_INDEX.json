@@ -1,0 +1,96 @@
+{
+  "schema_version": "dagkv.m2.v3_pilot_evidence_index.v1",
+  "recorded_at_utc": "2026-07-26T04:51:24Z",
+  "name": "m2_vllm_abba_v3_pilot_20260726_run10",
+  "runtime_path": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_pilot_20260726_run10",
+  "protocol_schema": "dagkv.m2.vllm_abba.v3",
+  "gate_status": "CALIBRATED_NOT_ACCEPTED",
+  "cohort_eligible": false,
+  "acceptance_claimed": false,
+  "preregistration": {
+    "path": "evidence/m2/M2_V3_RUN10_PILOT_PREREGISTRATION.json",
+    "sha256": "1a27700106ff9f505f570553768bbe092a817a2b28ffa2b3399154e3ed028278",
+    "parent_git_head": "e14cc1548ff080b2b3feacbda46186fa25d6f0a6",
+    "launch_git_head": "fdd0d76d1c88932fec08fc492aa03186d0c960d8",
+    "direct_child_and_only_preregistration_file_added": true
+  },
+  "execution": {
+    "run_id": "m2-948ba674c2924ce0b69103377e61cac1",
+    "completed_at_utc": "2026-07-26T04:49:07.209187+00:00",
+    "dagkv_head": "fdd0d76d1c88932fec08fc492aa03186d0c960d8",
+    "dagkv_snapshot_sha256": "a26eb76711ae97cf7726c54dcda7b41b5b568c821782102ff5542235ac4ca641",
+    "vllm_head": "2e5d72fa44e29cdae21023d6cd4de03bdba9bfbd",
+    "vllm_snapshot_sha256": "f9515d24f33c03580e48d4b660339f9573504bd532b998895ce673461166f07e",
+    "implementation_manifest_sha256": "7518b632a8f2f287242a432f972879cd2daa0ad10651dc58891a4265fa96c1b6",
+    "model_manifest_sha256": "495449c9d0f37192891556f69a3f6803a86da8d9ab5efdc9eae8d2ab454109ab",
+    "runtime_binary_manifest_sha256": "d7a772ceb124cafca0dd86a54334f40b56d7b10f319b2286b9b44151abf0e98a",
+    "reproducibility_fingerprint": "2dd76b382fc17887d1e4d68f70b0f15c59baf766dc1254cd57533b7985992a50"
+  },
+  "runtime_import_boundary": {
+    "schema_version": "dagkv.m2.runtime_import_boundary.v1",
+    "base_dependency_manifest_sha256": "e797f0e5bd261f1b168dc72439f69efe48706696018369554e941c1535dc3feb",
+    "base_dependency_count": 239,
+    "effective_dependency_manifest_sha256": "8f788db64878352d8df9993b09de54590fd58285305cc084cd5c427e536c14ad",
+    "effective_dependency_count": 250,
+    "added_dependency_manifest_sha256": "cbe0e20b70ab078684a409e53a044968ac4cd666e878e9fb5a899cc4050afbd6",
+    "added_dependency_count": 11,
+    "removed_dependency_count": 0,
+    "cv2_prefix_observed_and_restored": true,
+    "setuptools_vendor_origin_verified": true,
+    "postflight_boundary_unchanged": true
+  },
+  "nvidia": {
+    "driver_version": "580.173.02",
+    "bundle_manifest_sha256": "5024d87db69d7136e1dc14e33b6cec143c2411c7cf78eb3142a08e0436d602ee",
+    "bundle_content_digest": "3a0284cce5cc9a6ff74f6176e8a913d33d195b679ffc5d829c0c3671b55b785c",
+    "mapped_libcuda_path": "/home/data/25_oyzx/dagkv_runtime/nvidia_58017302_ubuntu_exact_v2/rootfs/usr/lib/x86_64-linux-gnu/libcuda.so.580.173.02",
+    "mapped_libcuda_sha256": "266916dac6c5e7e4655526570cf303a6cc017880d2552960abc66017a7c98cf4",
+    "postflight_unchanged": true
+  },
+  "observations": {
+    "all_phase_token_id": 932,
+    "within_requested_tolerance": true,
+    "minimum_top1_margin": 0.4375,
+    "cold_prefix_max_abs_error": 0.109375,
+    "exact_pairs": [
+      "A1=A2",
+      "G=B1",
+      "G=B2",
+      "B1=B2"
+    ],
+    "b1_external_hit_tokens": 16,
+    "b2_external_hit_tokens": 16,
+    "dma_job_count": 4,
+    "bytes_per_dma": 2359296,
+    "transfer_digest": "c18a2c102f5afef89d1bd422898626c8a766c00cfeb67610da41ff667172bdc4"
+  },
+  "artifacts": {
+    "sha256sums_sha256": "16c918fcf3d22a0269da2eaa47362ddcc2a6241164a6bb8fd25d72d8ff3bab3c",
+    "result_sha256": "a68c72e096b085ab2e44650fe4c310798411a8ea743982390e831c185f157922",
+    "provenance_sha256": "f4cacfce39f271716776288195170b8a73020a9ba2e8df905d35fa37a81a1461",
+    "diagnostic_trace_sha256": "8a82276e84e1fcda0c18785baee0e12828c4870fdeecbd7e64d1d606d6ccdbd4",
+    "native_trace_sha256": "6c8d5d4f1d5eefd304a986fbf9171a9f990808f2ae7fefe98730f9508c50bfec",
+    "execution_ids_sha256": "47552fd69edd61dd8c1bb889c9214e06ee47fc06787e2a6276364722885d4485",
+    "protocol_sha256": "2827328ab84f0957a33ce6e596a6d57ecdea672a6dcd5dd960f397e42c5eec70",
+    "verified_sha256sums": true
+  },
+  "independent_raw_replay": {
+    "passed": true,
+    "exit_code": 0,
+    "reported_run_id": "m2-948ba674c2924ce0b69103377e61cac1",
+    "reported_max_abs_error": 0.109375,
+    "fresh_process": true,
+    "command": [
+      "/home/data/25_oyzx/Agentrix/vllm/.venv/bin/python",
+      "/home/data/25_oyzx/cagent-work/dagkv/tools/m2_raw_replay.py",
+      "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_pilot_20260726_run10"
+    ]
+  },
+  "success_artifacts_absent_by_design": [
+    "M2_ITEM8_FORMAL_RUN_MANIFEST.json",
+    "M2_ITEM8_ACCEPTANCE_MANIFEST.json",
+    "M2_ACCEPTANCE_MANIFEST.json"
+  ],
+  "claim_limit": "Successful excluded M2 v3 protocol-validation pilot only. It contributes zero calibration or holdout samples and closes no item-8, aggregate M2, performance, C1, C2, or C3 claim.",
+  "next_action": "Prepare a fresh 59-process M2 v3 calibration campaign bound to this implementation and reproducibility fingerprint."
+}

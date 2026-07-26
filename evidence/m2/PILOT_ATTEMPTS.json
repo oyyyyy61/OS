@@ -1,6 +1,6 @@
 {
   "schema_version": "dagkv.m2.pilot_attempt_index.v1",
-  "recorded_at_utc": "2026-07-26T03:45:22Z",
+  "recorded_at_utc": "2026-07-26T04:51:24Z",
   "runtime_root": "/home/data/25_oyzx/dagkv_runtime",
   "cohort_eligible": false,
   "acceptance_claimed": false,
@@ -82,18 +82,36 @@
       "dagkv_head": "7ec20dbefc33705586658297a62f8aa5b5608d2b",
       "run_id": "m2-0b7d68341ad84a82a5124b0e2a48c612",
       "cohort_eligible": false
+    },
+    {
+      "name": "m2_vllm_abba_v3_pilot_20260726_run10",
+      "protocol_schema": "dagkv.m2.vllm_abba.v3",
+      "gate_status": "CALIBRATED_NOT_ACCEPTED",
+      "result_sha256": "a68c72e096b085ab2e44650fe4c310798411a8ea743982390e831c185f157922",
+      "failure": null,
+      "resolution": "runtime-import-boundary protocol-freeze pilot; independently raw-replayed and excluded before the v3 calibration campaign",
+      "preregistration_sha256": "1a27700106ff9f505f570553768bbe092a817a2b28ffa2b3399154e3ed028278",
+      "provenance_sha256": "f4cacfce39f271716776288195170b8a73020a9ba2e8df905d35fa37a81a1461",
+      "sha256sums_sha256": "16c918fcf3d22a0269da2eaa47362ddcc2a6241164a6bb8fd25d72d8ff3bab3c",
+      "dagkv_head": "fdd0d76d1c88932fec08fc492aa03186d0c960d8",
+      "run_id": "m2-948ba674c2924ce0b69103377e61cac1",
+      "independent_raw_replay_passed": true,
+      "cohort_eligible": false
     }
   ],
   "protocol_freeze_pilot": {
-    "name": "m2_vllm_abba_v2_pilot_20260725_run08",
-    "runtime_path": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v2_pilot_20260725_run08",
-    "dagkv_head": "8724f5400c47444cb540fddb25a85a85864cdbe6",
-    "implementation_manifest_sha256": "6b3377bca003b0d78f638776fd28faa0f94e60c5749c344ff889e2e474c373bc",
-    "reproducibility_fingerprint": "29a746cfa88d5ec0fc05863d629a10a4745cf91c7723697802191781136760f6",
-    "provenance_sha256": "ecbf3e05169eaffb96d96206663261fa658daefe089060c0fa68176795c96333",
-    "sha256sums_sha256": "9315c06e15fb2ed3dc54e6e3fe7cbadb6b9ce1302492337b1fe049dd2191edc6",
-    "diagnostic_trace_sha256": "3f2747d4a90428dc5d1f710266c0396adefc2f862912985859f442d7e1da9142",
-    "native_trace_sha256": "2a409a68f16da360978c48990fa1e6fd7229067ecba07e3bffb671e0646a0d7d",
+    "name": "m2_vllm_abba_v3_pilot_20260726_run10",
+    "protocol_schema": "dagkv.m2.vllm_abba.v3",
+    "runtime_path": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_pilot_20260726_run10",
+    "dagkv_head": "fdd0d76d1c88932fec08fc492aa03186d0c960d8",
+    "implementation_manifest_sha256": "7518b632a8f2f287242a432f972879cd2daa0ad10651dc58891a4265fa96c1b6",
+    "reproducibility_fingerprint": "2dd76b382fc17887d1e4d68f70b0f15c59baf766dc1254cd57533b7985992a50",
+    "preregistration_sha256": "1a27700106ff9f505f570553768bbe092a817a2b28ffa2b3399154e3ed028278",
+    "result_sha256": "a68c72e096b085ab2e44650fe4c310798411a8ea743982390e831c185f157922",
+    "provenance_sha256": "f4cacfce39f271716776288195170b8a73020a9ba2e8df905d35fa37a81a1461",
+    "sha256sums_sha256": "16c918fcf3d22a0269da2eaa47362ddcc2a6241164a6bb8fd25d72d8ff3bab3c",
+    "diagnostic_trace_sha256": "8a82276e84e1fcda0c18785baee0e12828c4870fdeecbd7e64d1d606d6ccdbd4",
+    "native_trace_sha256": "6c8d5d4f1d5eefd304a986fbf9171a9f990808f2ae7fefe98730f9508c50bfec",
     "verified_sha256sums": true,
     "independent_raw_replay_passed": true,
     "acceptance_manifest_present": false,
@@ -108,6 +126,8 @@
     ],
     "dma_jobs": 4,
     "bytes_per_dma": 2359296,
-    "canonical_digest": "c18a2c102f5afef89d1bd422898626c8a766c00cfeb67610da41ff667172bdc4"
+    "canonical_digest": "c18a2c102f5afef89d1bd422898626c8a766c00cfeb67610da41ff667172bdc4",
+    "dependency_manifest_sha256": "8f788db64878352d8df9993b09de54590fd58285305cc084cd5c427e536c14ad",
+    "nvidia_userspace_content_digest": "3a0284cce5cc9a6ff74f6176e8a913d33d195b679ffc5d829c0c3671b55b785c"
   }
 }
