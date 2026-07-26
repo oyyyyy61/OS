@@ -44,7 +44,9 @@ formal holdouts. One formal run can record only one holdout pass. Item 8 closes
 only after the complete 20-run holdout set passes a closed-set audit and is
 referenced by an aggregate acceptance manifest. Exact source, binary, model,
 environment, command, and raw-evidence provenance is fail-closed throughout.
-M2 therefore remains open.
+Campaign02 now satisfies this item-8 boundary. Aggregate M2 remains open until
+a cross-evidence audit verifies all nine conditions and records a separate
+aggregate acceptance decision.
 
 The calibration path now uses a two-stage, no-retry campaign launcher and a
 closed cohort validator. `tools/m2_raw_replay.py` independently reloads the
@@ -62,10 +64,12 @@ bundle root, manifest, content digest, and driver version.
 The earlier v2 cohort passed 59/59 under its historical driver and froze a v2
 tolerance with `atol=0.125, rtol=0`. It cannot supply a v3 parent. The fresh v3
 calibration passed 59/59 under driver 580.173.02 and froze a new v3 tolerance
-with the same fixed cap. The v3 formal cohort remains 0/20. This is
-pre-acceptance infrastructure only. Formal campaign01 completed all 20 run
-computations but failed the fail-closed post-aggregate replay before seal
-publication; it is excluded and campaign02 must restart from zero.
+with the same fixed cap. Formal campaign01 completed all 20 run computations
+but failed the fail-closed post-aggregate replay before seal publication and
+remains excluded. Campaign02 restarted from zero, passed 20/20 holdouts, closed
+the exact 42-record journal, published the item-8 acceptance manifest and
+create-only bundle seal, and passed independent full-bundle replay. Item 8 is
+closed; aggregate M2 and every performance claim remain open.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint

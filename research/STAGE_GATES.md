@@ -62,10 +62,14 @@ original driver and implementation fingerprint. The current v3 gate binds the
 exact NVIDIA Debian package payloads, loaded driver `580.173.02`, and actual
 mapped `libcuda`; it therefore requires a new excluded pilot, 59-process
 calibration, frozen tolerance, and 20-process formal cohort. The excluded pilot
-passed, the v3 calibration is 59/59, its create-only tolerance is frozen, and
-the formal cohort is 0/20. The first formal campaign failed its post-aggregate
-replay before seal publication and remains excluded; a fresh campaign must
-restart from zero. No v2 sample or tolerance can satisfy item 8 under v3.
+passed, the v3 calibration is 59/59, and its create-only tolerance is frozen.
+The first formal campaign failed its post-aggregate replay before seal
+publication and remains excluded. Campaign02 restarted from zero, passed 20/20,
+published the item-8 acceptance manifest and create-only seal, and passed
+independent full-bundle replay. Item 8 is closed under v3; aggregate M2 remains
+open until a cross-evidence audit verifies all nine conditions and records a
+separate aggregate acceptance decision. No v2 sample or tolerance contributes
+to this item-8 decision.
 
 ## M3-M6
 
