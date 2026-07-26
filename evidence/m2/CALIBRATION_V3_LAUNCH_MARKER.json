@@ -1,0 +1,9 @@
+{
+  "schema_version": "dagkv.m2.calibration_launch_marker.v1",
+  "campaign_id": "m2-calibration-81343d92fe004cc5bc8ac73dddb985f6",
+  "campaign_root": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_calibration_20260726_campaign01",
+  "campaign_preregistration_sha256": "2ae93465db9683f4a2b7d560e393159adc3d10c4cf95c542286bca5708d1db99",
+  "preparation_git_head": "621b46710b3113185ce165655ae226a9c8bb2771",
+  "created_at_utc": "2026-07-26T05:13:34+00:00",
+  "claim_scope": "M2_CALIBRATION_ONLY_NO_PERFORMANCE_CLAIM"
+}
