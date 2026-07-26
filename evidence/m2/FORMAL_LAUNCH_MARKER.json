@@ -1,9 +1,9 @@
 {
   "schema_version": "dagkv.m2.formal_launch_marker.v1",
-  "campaign_id": "m2-formal-d0e5caa806c04fefa04e346108d85e96",
-  "campaign_root": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_formal_20260726_campaign01",
-  "campaign_preregistration_sha256": "ba51ba950b1b2620a2159a4c9330808968fad23132d44d6ef758f66f4d36a9d0",
-  "preparation_git_head": "20f3401756ee662ef802a20057b1674cfd8ace85",
-  "created_at_utc": "2026-07-26T06:23:43+00:00",
+  "campaign_id": "m2-formal-e686bfd8792041c7a714d35e0b122066",
+  "campaign_root": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_formal_20260726_campaign02",
+  "campaign_preregistration_sha256": "f49f61e2ae380f54a61510a0946a2bd1e9fe6662a455ba9320cb7e3c39405d90",
+  "preparation_git_head": "a33bb1e58398414e1ceefcf7be419cb9feadd4d3",
+  "created_at_utc": "2026-07-26T07:18:02+00:00",
   "claim_scope": "M2_ITEM8_CORRECTNESS_ONLY_NO_PERFORMANCE_CLAIM"
 }
