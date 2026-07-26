@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "dagkv.m3.c1_component_evidence.v1"
+SCHEMA_VERSION = "dagkv.m3.c1_component_evidence.v2"
 MANIFEST_NAME = "M3_C1_COMPONENT_EVIDENCE.json"
 CHECKSUM_NAME = "SHA256SUMS"
 PUBLICATION_LOCK_SUFFIX = ".m3-c1-component-publication.lock"
@@ -163,6 +163,163 @@ def _read_json(path: Path, *, label: str) -> tuple[dict[str, Any], bytes]:
         raise C1EvidenceError(f"invalid {label}: {exc}") from exc
     require(isinstance(value, dict), f"{label} must be a JSON object")
     return value, raw
+
+
+def _capture_python_binding(python: Path) -> dict[str, Any]:
+    launcher = Path(os.path.abspath(python.expanduser()))
+    require(launcher.is_file(), "bound Python launcher is missing")
+    require(os.access(launcher, os.X_OK), "bound Python launcher is not executable")
+    require(launcher.is_symlink(), "bound Python launcher must be a symlink")
+    launcher_symlink_target = os.readlink(launcher)
+    resolved = launcher.resolve(strict=True)
+    require(
+        resolved.is_file()
+        and not resolved.is_symlink()
+        and os.access(resolved, os.X_OK),
+        "resolved Python executable is invalid",
+    )
+    probe_source = (
+        "import json,sys;"
+        "print(json.dumps({"
+        "'sys_executable':sys.executable,"
+        "'sys_prefix':sys.prefix,"
+        "'sys_base_prefix':sys.base_prefix,"
+        "'version':f'Python {sys.version_info.major}."
+        "{sys.version_info.minor}.{sys.version_info.micro}'"
+        "},sort_keys=True))"
+    )
+    probe = subprocess.run(
+        [str(launcher), "-I", "-c", probe_source],
+        env=dict(BASE_ENVIRONMENT),
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    require(
+        probe.returncode == 0,
+        "bound Python probe failed: "
+        f"{probe.stderr.decode(errors='replace')[-1000:].strip()}",
+    )
+    try:
+        runtime = json.loads(
+            probe.stdout,
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise C1EvidenceError(f"bound Python probe is invalid: {exc}") from exc
+    require(
+        isinstance(runtime, dict)
+        and set(runtime)
+        == {"sys_executable", "sys_prefix", "sys_base_prefix", "version"}
+        and all(isinstance(value, str) for value in runtime.values()),
+        "bound Python probe fields differ",
+    )
+    require(
+        Path(os.path.abspath(runtime["sys_executable"])) == launcher,
+        "bound Python changed its launcher identity",
+    )
+    prefix = Path(runtime["sys_prefix"])
+    base_prefix = Path(runtime["sys_base_prefix"])
+    require(
+        prefix.is_absolute() and base_prefix.is_absolute(), "Python prefix is invalid"
+    )
+    require(prefix != base_prefix, "bound Python is not a virtual environment")
+    venv_bin = prefix / "bin"
+    require(
+        prefix.is_dir()
+        and not prefix.is_symlink()
+        and venv_bin.is_dir()
+        and not venv_bin.is_symlink(),
+        "bound virtual-environment directories are invalid",
+    )
+    require(launcher.parent == venv_bin, "Python launcher is outside its prefix")
+    pyvenv_cfg = prefix / "pyvenv.cfg"
+    require(
+        pyvenv_cfg.is_file() and not pyvenv_cfg.is_symlink(),
+        "bound pyvenv.cfg is missing",
+    )
+    binding: dict[str, Any] = {
+        "launcher": {
+            "path": str(launcher),
+            "link_target": launcher_symlink_target,
+        },
+        "resolved_executable": {
+            "path": str(resolved),
+            "sha256": _sha256_file(resolved),
+        },
+        "venv": {
+            "root": str(prefix),
+            "bin": str(venv_bin),
+            "pyvenv_cfg": {
+                "path": str(pyvenv_cfg),
+                "sha256": _sha256_file(pyvenv_cfg),
+            },
+        },
+        "runtime": runtime,
+    }
+    require(
+        launcher.resolve(strict=True) == resolved
+        and os.readlink(launcher) == launcher_symlink_target
+        and _sha256_file(resolved) == binding["resolved_executable"]["sha256"]
+        and _sha256_file(pyvenv_cfg) == binding["venv"]["pyvenv_cfg"]["sha256"],
+        "bound Python changed during identity capture",
+    )
+    return binding
+
+
+def _validate_python_binding(binding: Any) -> Path:
+    require(
+        isinstance(binding, dict)
+        and set(binding) == {"launcher", "resolved_executable", "venv", "runtime"},
+        "Python binding fields differ",
+    )
+    launcher = binding["launcher"]
+    resolved = binding["resolved_executable"]
+    venv = binding["venv"]
+    runtime = binding["runtime"]
+    require(
+        isinstance(launcher, dict)
+        and set(launcher) == {"path", "link_target"}
+        and all(isinstance(value, str) for value in launcher.values()),
+        "Python launcher binding fields differ",
+    )
+    require(
+        isinstance(resolved, dict)
+        and set(resolved) == {"path", "sha256"}
+        and all(isinstance(value, str) for value in resolved.values()),
+        "resolved Python binding fields differ",
+    )
+    require(
+        isinstance(venv, dict)
+        and set(venv) == {"root", "bin", "pyvenv_cfg"}
+        and isinstance(venv["root"], str)
+        and isinstance(venv["bin"], str),
+        "virtual-environment binding fields differ",
+    )
+    pyvenv_cfg = venv["pyvenv_cfg"]
+    require(
+        isinstance(pyvenv_cfg, dict)
+        and set(pyvenv_cfg) == {"path", "sha256"}
+        and all(isinstance(value, str) for value in pyvenv_cfg.values()),
+        "pyvenv.cfg binding fields differ",
+    )
+    require(
+        isinstance(runtime, dict)
+        and set(runtime)
+        == {"sys_executable", "sys_prefix", "sys_base_prefix", "version"}
+        and all(isinstance(value, str) for value in runtime.values()),
+        "Python runtime binding fields differ",
+    )
+    require(
+        runtime["version"].startswith("Python 3.12"), "bound Python version differs"
+    )
+    python_path = Path(launcher["path"])
+    require(
+        _capture_python_binding(python_path) == binding,
+        "bound Python environment differs",
+    )
+    return python_path
 
 
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
@@ -578,25 +735,7 @@ def validate_bundle(
     )
 
     python_binding = manifest["python"]
-    require(
-        isinstance(python_binding, dict)
-        and set(python_binding) == {"path", "sha256", "version"},
-        "Python binding fields differ",
-    )
-    python_path = Path(python_binding["path"])
-    require(
-        python_path.is_file() and not python_path.is_symlink(),
-        "bound Python executable is missing",
-    )
-    require(
-        _sha256_file(python_path) == python_binding["sha256"],
-        "bound Python executable differs",
-    )
-    require(
-        isinstance(python_binding["version"], str)
-        and python_binding["version"].startswith("Python 3.12"),
-        "bound Python version differs",
-    )
+    python_path = _validate_python_binding(python_binding)
 
     source = manifest["source"]
     require(isinstance(source, dict), "source capture is invalid")
@@ -831,7 +970,7 @@ def run_bundle(
     timeout_seconds: int,
 ) -> tuple[str, str, int]:
     output_root = output_root.expanduser().resolve()
-    python = python.expanduser().resolve(strict=True)
+    python = Path(os.path.abspath(python.expanduser()))
     acceptance = acceptance.expanduser().resolve(strict=True)
     require(output_root.is_absolute(), "output root must be absolute")
     output_root.parent.mkdir(parents=True, exist_ok=True)
@@ -858,6 +997,7 @@ def run_bundle(
             _git_text("cat-file", "-t", accepted_head) == "commit",
             "accepted M2 HEAD is absent",
         )
+        python_binding = _capture_python_binding(python)
 
         focused_junit = staging / "logs" / "c1-focused.junit.xml"
         full_junit = staging / "logs" / "repository-full.junit.xml"
@@ -946,15 +1086,9 @@ def run_bundle(
             timeout_seconds=timeout_seconds,
         )
         m2["acceptance_copy"] = _file_entry(acceptance_copy, root=staging)
-        python_version = (
-            subprocess.run(
-                [str(python), "--version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                check=True,
-            )
-            .stdout.decode()
-            .strip()
+        require(
+            _capture_python_binding(python) == python_binding,
+            "bound Python environment changed during evidence execution",
         )
         manifest = {
             "schema_version": SCHEMA_VERSION,
@@ -968,11 +1102,7 @@ def run_bundle(
                 "tree": _git_text("show", "-s", "--format=%T", head),
                 "clean": True,
             },
-            "python": {
-                "path": str(python),
-                "sha256": _sha256_file(python),
-                "version": python_version,
-            },
+            "python": python_binding,
             "source": source,
             "commands": commands,
             "junit": {

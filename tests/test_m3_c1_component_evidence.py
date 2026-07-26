@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import copy
+import sys
 from pathlib import Path
 
 import pytest
@@ -195,6 +197,61 @@ def test_command_runner_prepares_only_in_staging_junit_parent(
             cwd=evidence.REPO_ROOT,
             timeout_seconds=10,
         )
+
+
+def test_python_binding_preserves_and_binds_virtual_environment() -> None:
+    launcher = Path(sys.executable)
+    binding = evidence._capture_python_binding(launcher)
+
+    assert binding["launcher"]["path"] == str(launcher)
+    assert binding["launcher"]["path"] != binding["resolved_executable"]["path"]
+    assert binding["runtime"]["sys_executable"] == str(launcher)
+    assert binding["runtime"]["sys_prefix"] == sys.prefix
+    assert binding["runtime"]["sys_base_prefix"] == sys.base_prefix
+    assert binding["resolved_executable"]["path"] == str(launcher.resolve())
+    assert binding["resolved_executable"]["sha256"] == evidence._sha256_file(
+        launcher.resolve()
+    )
+    assert binding["venv"]["pyvenv_cfg"]["sha256"] == evidence._sha256_file(
+        Path(sys.prefix) / "pyvenv.cfg"
+    )
+    assert evidence._validate_python_binding(binding) == launcher
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("launcher", "link_target"),
+        ("resolved_executable", "sha256"),
+        ("venv", "pyvenv_cfg", "sha256"),
+        ("runtime", "sys_prefix"),
+    ],
+)
+def test_python_binding_rejects_manifest_identity_drift(
+    path: tuple[str, ...],
+) -> None:
+    binding = evidence._capture_python_binding(Path(sys.executable))
+    changed = copy.deepcopy(binding)
+    owner = changed
+    for key in path[:-1]:
+        owner = owner[key]
+    owner[path[-1]] = "0" * 64
+
+    with pytest.raises(evidence.C1EvidenceError, match="environment differs"):
+        evidence._validate_python_binding(changed)
+
+
+def test_python_binding_rejects_alias_outside_virtual_environment(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(evidence.C1EvidenceError, match="must be a symlink"):
+        evidence._capture_python_binding(Path("/usr/bin/true"))
+
+    alias = tmp_path / "python"
+    alias.symlink_to(Path(sys.executable).resolve())
+
+    with pytest.raises(evidence.C1EvidenceError, match="not a virtual environment"):
+        evidence._capture_python_binding(alias)
 
 
 def test_create_only_rename_preserves_existing_target(tmp_path: Path) -> None:
