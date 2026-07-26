@@ -174,6 +174,29 @@ def test_command_validation_rejects_argv_or_environment_drift(
         )
 
 
+def test_command_runner_prepares_only_in_staging_junit_parent(
+    tmp_path: Path,
+) -> None:
+    result = evidence._run_command(
+        "probe",
+        ("/usr/bin/true", "--junitxml={output_root}/nested/result.xml"),
+        output_root=tmp_path,
+        cwd=evidence.REPO_ROOT,
+        timeout_seconds=10,
+    )
+    assert result["exit_code"] == 0
+    assert (tmp_path / "nested").is_dir()
+
+    with pytest.raises(evidence.C1EvidenceError, match="escapes evidence staging"):
+        evidence._run_command(
+            "escape",
+            ("/usr/bin/true", "--junitxml={output_root}/../escape.xml"),
+            output_root=tmp_path,
+            cwd=evidence.REPO_ROOT,
+            timeout_seconds=10,
+        )
+
+
 def test_create_only_rename_preserves_existing_target(tmp_path: Path) -> None:
     source = tmp_path / "source"
     target = tmp_path / "target"

@@ -210,6 +210,15 @@ def _run_command(
     timeout_seconds: int,
 ) -> dict[str, Any]:
     argv = [item.replace("{output_root}", str(output_root)) for item in argv_template]
+    for item in argv:
+        if not item.startswith("--junitxml="):
+            continue
+        junit_path = Path(item.removeprefix("--junitxml=")).resolve()
+        require(
+            junit_path.is_relative_to(output_root.resolve()),
+            "declared JUnit output escapes evidence staging",
+        )
+        junit_path.parent.mkdir(parents=True, exist_ok=True)
     started_at = _utc_now()
     started = time.monotonic()
     try:
@@ -895,13 +904,19 @@ def run_bundle(
                 timeout_seconds=timeout_seconds,
             ),
         ]
-        require(
-            all(
-                command["exit_code"] == 0 and not command["timed_out"]
-                for command in commands
-            ),
-            "component command failed",
-        )
+        failed = [
+            command
+            for command in commands
+            if command["exit_code"] != 0 or command["timed_out"]
+        ]
+        if failed:
+            command = failed[0]
+            stderr_path = staging / command["stderr"]["path"]
+            terminal = stderr_path.read_text(errors="replace")[-2000:].strip()
+            raise C1EvidenceError(
+                f"{command['command_id']} failed with exit "
+                f"{command['exit_code']}: {terminal}"
+            )
         focused_summary = _parse_junit(focused_junit)
         full_summary = _parse_junit(full_junit)
         require(

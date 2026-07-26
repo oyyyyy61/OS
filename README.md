@@ -88,8 +88,8 @@ implements exact PPM joint-outcome aggregation, explicit independence groups,
 fanout coalescing, first-versus-repeated reuse statistics, total-variation
 drift bounds, an oracle information barrier, and snapshot-staleness rejection.
 It exposes PBKV-style additive and independent-marginal baselines behind
-separate modes. Sixteen focused mechanism tests, eleven evidence-validator
-tests, and the complete 342-test repository regression pass. This is unsealed
+separate modes. Sixteen focused mechanism tests, twelve evidence-validator
+tests, and the complete 343-test repository regression pass. This is unsealed
 C1-A component evidence; trace calibration, paired policy effects, GPU
 performance, and every C1 paper claim remain open.
 

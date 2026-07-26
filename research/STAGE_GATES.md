@@ -102,8 +102,8 @@ The normative C1 boundary and later experiment gates are frozen in
 - exposes C1 nominal, C1 robust-lower, a PBKV-style additive proxy, and
   independent-union modes for matched attribution.
 
-Sixteen focused C1 tests, eleven evidence-validator tests, and the full
-342-test repository regression pass. This is implementation evidence only.
+Sixteen focused C1 tests, twelve evidence-validator tests, and the full
+343-test repository regression pass. This is implementation evidence only.
 C1-A remains unsealed until a clean committed source snapshot, JUnit,
 checksums, aggregate M2 historical replay, and an independent component replay
 are frozen. C1-B trace/calibration, C1-C paired policy replay, and C1-D
