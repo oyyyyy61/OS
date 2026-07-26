@@ -1,6 +1,6 @@
 # M2 Component Test Matrix
 
-Status: living pre-acceptance index for the v3 evidence protocol, 2026-07-25.
+Status: living pre-acceptance index for the v3 evidence protocol, 2026-07-26.
 
 The three CPU suites passed as one create-only, read-only bundle bound to clean
 DAGKV commit `67e69ffb3159c66805018fe78b13a7b29f011adf`. External and raw-only
@@ -9,9 +9,13 @@ in `evidence/m2/M2_COMPONENT_EVIDENCE_INDEX.json`; this directly supports M2
 items 1-7 and leaves item 8 and aggregate M2 open.
 
 The exact excluded v3 `run09` pilot command, environment, input hashes, and
-no-retry policy are frozen in
-`evidence/m2/M2_V3_PILOT_PREREGISTRATION.json`. Its CUDA capability check and
-execution remain pending until the RTX 4090 has no compute process.
+no-retry policy remain frozen in
+`evidence/m2/M2_V3_PILOT_PREREGISTRATION.json`. The attempt completed all ABBA
+computations and then failed the exact loader-environment postflight after an
+OpenCV import mutation. Its immutable failure hashes and diagnostic-only
+observations are indexed in
+`evidence/m2/M2_V3_RUN09_FAILURE_EVIDENCE_INDEX.json`. A fresh excluded run10
+pilot remains required after the import-boundary correction is frozen.
 
 | Gate | Direct component or pilot evidence | Remaining gate-closing evidence |
 | --- | --- | --- |

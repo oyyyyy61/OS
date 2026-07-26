@@ -1,0 +1,73 @@
+{
+  "schema_version": "dagkv.m2.v3_failed_pilot_evidence_index.v1",
+  "recorded_at_utc": "2026-07-26T03:45:22Z",
+  "name": "m2_vllm_abba_v3_pilot_20260725_run09",
+  "runtime_path": "/home/data/25_oyzx/dagkv_runtime/m2_vllm_abba_v3_pilot_20260725_run09",
+  "protocol_schema": "dagkv.m2.vllm_abba.v3",
+  "gate_status": "FAILED",
+  "cohort_eligible": false,
+  "acceptance_claimed": false,
+  "independent_raw_replay_passed": false,
+  "preregistration": {
+    "path": "evidence/m2/M2_V3_PILOT_PREREGISTRATION.json",
+    "sha256": "0adf204e5e2f2203b94d6a8486bf2e7cd5b6acf1b794aa0856581ddd480e56a1",
+    "dependency_manifest_sha256": "e797f0e5bd261f1b168dc72439f69efe48706696018369554e941c1535dc3feb",
+    "dependency_count": 239
+  },
+  "execution": {
+    "run_id": "m2-0b7d68341ad84a82a5124b0e2a48c612",
+    "dagkv_head": "7ec20dbefc33705586658297a62f8aa5b5608d2b",
+    "implementation_manifest_sha256": "b1fb60e019d97d31db98081f9cbe6aa5a03cba876cf0e11c32b2270f9528e119",
+    "reproducibility_fingerprint": "cf73ef9a831d469bb2956d85bba48b01c78b8d2887f64af71561e999822dee43",
+    "effective_dependency_manifest_sha256": "8f788db64878352d8df9993b09de54590fd58285305cc084cd5c427e536c14ad",
+    "effective_dependency_count": 250,
+    "result_sha256": "68f010f2c9e428f7e8958d15abcdbc474d8623f1e7889c6b78ab9851ab3380ef",
+    "provenance_sha256": "96143e536a8bcacc90421b231c3ff05bfab9f59a5831b0884267df1c6dec23f9"
+  },
+  "failure": {
+    "exception_type": "M2ValidationError",
+    "message": "LD_LIBRARY_PATH must begin with the validated NVIDIA bundle library path",
+    "stage": "postflight_after_abba",
+    "root_cause": "vLLM imported OpenCV, whose Python bootstrap prepended its virtual-environment lib64 path before the validated NVIDIA bundle path",
+    "additional_preregistration_drift": [
+      "setuptools runtime import exposed 11 vendored distributions, changing the dependency view from 239 to 250 packages",
+      "the import-path preparation duplicated the integration entry in PYTHONPATH"
+    ]
+  },
+  "diagnostic_only_observations": {
+    "all_phase_token_id": 932,
+    "exact_logit_groups": [
+      ["A1", "A2"],
+      ["G", "B1", "B2"]
+    ],
+    "cold_prefix_max_abs_error": 0.109375,
+    "dma_job_count": 4,
+    "bytes_per_dma": 2359296,
+    "transfer_digest": "c18a2c102f5afef89d1bd422898626c8a766c00cfeb67610da41ff667172bdc4",
+    "claim_limit": "The failed artifact has no success checksum or acceptance manifest and contributes no cohort sample."
+  },
+  "artifacts": {
+    "diagnostic_transfers.jsonl": "a2d5c9990ca889fbf5ec173306d9bd03e1861a4d8d838214ec7bef21e3c9bbbc",
+    "execution_ids.json": "e188b77a30deed38da00ce93639a173257654fe0b14d8508b2ace5096e4a2cf0",
+    "logits_A1.npy": "823f3cb5405f84abed431b319e15a67ad4b0deede5d4a3ef402fd3af965d704d",
+    "logits_A2.npy": "823f3cb5405f84abed431b319e15a67ad4b0deede5d4a3ef402fd3af965d704d",
+    "logits_B1.npy": "547ae2fe8181882d7995b62598c448c14cd036dd55e748947137bb1c38405263",
+    "logits_B2.npy": "547ae2fe8181882d7995b62598c448c14cd036dd55e748947137bb1c38405263",
+    "logits_G.npy": "547ae2fe8181882d7995b62598c448c14cd036dd55e748947137bb1c38405263",
+    "native_lifecycle.jsonl": "c49fc84764848eca5cb5e42a92d539451c5f3bb40d57a70315530377e6006608",
+    "protocol.md": "cdcdd7b70e60dd55568742b4c315d2e5f9e31af5003f13b7ff54b66ae9d69b8c",
+    "provenance.json": "96143e536a8bcacc90421b231c3ff05bfab9f59a5831b0884267df1c6dec23f9",
+    "result.json": "68f010f2c9e428f7e8958d15abcdbc474d8623f1e7889c6b78ab9851ab3380ef",
+    "source_state/dagkv.tracked.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "source_state/dagkv.untracked.tar": "84ff92691f909a05b224e1c56abb4864f01b4f8e3c854e4bb4c7baf1d3f6d652",
+    "source_state/vllm.tracked.patch": "966d22c4ffd2424af9fcaaf8f13702388cccd632d1789d34667c6b70f6adc76f",
+    "source_state/vllm.untracked.tar": "829c0fb0504c059412fe0917639c225d0f84b196da07082cc550e01230f69270"
+  },
+  "missing_success_artifacts": [
+    "SHA256SUMS",
+    "M2_ITEM8_FORMAL_RUN_MANIFEST.json",
+    "M2_ITEM8_ACCEPTANCE_MANIFEST.json",
+    "M2_ACCEPTANCE_MANIFEST.json"
+  ],
+  "next_action": "Freeze a create-only run10 only after the loader boundary, dependency-boundary provenance, PYTHONPATH idempotency, raw replay, and CPU regression tests pass."
+}

@@ -38,9 +38,10 @@ and cannot become the primary claim through this M2 result.
 
 `evidence/m2/PILOT_ATTEMPTS.json` is the append-only index for protocol-design
 executions. It includes failed v1 ID-correlation attempts, the successful v1
-run03 numerical pilot, the failed v2 A1/G phase-boundary attempt, and subsequent
-successful v2 validation pilots. Every indexed attempt is excluded from the
-59-run calibration cohort and the 20-run formal holdout cohort.
+run03 numerical pilot, the failed v2 A1/G phase-boundary attempt, subsequent
+successful v2 validation pilots, and the failed v3 run09 loader-boundary
+attempt. Every indexed attempt is excluded from the 59-run calibration cohort
+and the 20-run formal holdout cohort.
 
 The latest indexed successful v2 pilot recorded exact D2H/H2D
 canonical digests and byte counts, token 932 in all five phases, exact A1/A2,

@@ -1,6 +1,6 @@
 {
   "schema_version": "dagkv.m2.pilot_attempt_index.v1",
-  "recorded_at_utc": "2026-07-24T21:26:13Z",
+  "recorded_at_utc": "2026-07-26T03:45:22Z",
   "runtime_root": "/home/data/25_oyzx/dagkv_runtime",
   "cohort_eligible": false,
   "acceptance_claimed": false,
@@ -69,6 +69,19 @@
       "result_sha256": "ee0298868c15739d7c68e9e9ca7d0a19844dbb8518301d178e264c29438077be",
       "failure": null,
       "resolution": "post-evidence-chain protocol-freeze validation pilot; independently raw-replayed and excluded before campaign launch"
+    },
+    {
+      "name": "m2_vllm_abba_v3_pilot_20260725_run09",
+      "protocol_schema": "dagkv.m2.vllm_abba.v3",
+      "gate_status": "FAILED",
+      "result_sha256": "68f010f2c9e428f7e8958d15abcdbc474d8623f1e7889c6b78ab9851ab3380ef",
+      "failure": "OpenCV runtime import prepended its virtual-environment lib64 directory to LD_LIBRARY_PATH; the exact NVIDIA bundle-first postflight rejected the attempt. The preregistered 239-package dependency view also differed from the 250-package effective post-import view because setuptools exposed its vendored distributions.",
+      "resolution": "preserved as an excluded failed attempt; add a fail-closed runtime-import boundary, idempotent PYTHONPATH handling, and dual-phase dependency provenance before freezing run10",
+      "preregistration_sha256": "0adf204e5e2f2203b94d6a8486bf2e7cd5b6acf1b794aa0856581ddd480e56a1",
+      "provenance_sha256": "96143e536a8bcacc90421b231c3ff05bfab9f59a5831b0884267df1c6dec23f9",
+      "dagkv_head": "7ec20dbefc33705586658297a62f8aa5b5608d2b",
+      "run_id": "m2-0b7d68341ad84a82a5124b0e2a48c612",
+      "cohort_eligible": false
     }
   ],
   "protocol_freeze_pilot": {
