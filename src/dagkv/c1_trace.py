@@ -103,6 +103,12 @@ class ServiceDisposition(StrEnum):
     REQUEST_CANCELLED = "REQUEST_CANCELLED"
 
 
+class DemandServiceMode(StrEnum):
+    RESIDENT = "RESIDENT"
+    JOIN_ACTIVE_H2D = "JOIN_ACTIVE_H2D"
+    START_H2D = "START_H2D"
+
+
 class ScheduleProducerKind(StrEnum):
     REPLAY = "REPLAY"
     SEALED_NATURAL_TRACE = "SEALED_NATURAL_TRACE"
@@ -842,7 +848,9 @@ class PreServiceDemandView:
     demand_commit_id: str
     target_replica: ReplicaId
     action: LedgerAction
-    transfer_id: str
+    service_mode: DemandServiceMode
+    effective_transfer_id: str | None
+    effective_transfer_action: LedgerAction | None
     timestamp_ns: int
     lifecycle_prefix: tuple[LifecycleEvent, ...]
     runtime_event_count: int
@@ -855,6 +863,7 @@ class PreServiceDemandView:
     def __post_init__(self) -> None:
         require_text("demand_commit_id", self.demand_commit_id)
         _require_enum("pre-service action", self.action, LedgerAction)
+        _require_enum("pre-service mode", self.service_mode, DemandServiceMode)
         _require_enum("pre-service residency", self.residency, ResidencyState)
         _require_enum("pre-service target tier", self.target_replica.tier, Tier)
         if self.target_replica.tier != Tier.GPU:
@@ -864,7 +873,30 @@ class PreServiceDemandView:
         _validate_lifecycle_prefix(self.lifecycle_prefix)
         if self.action not in {LedgerAction.LOAD, LedgerAction.PREFETCH}:
             raise TraceValidationError("pre-service view action is not H2D")
-        require_text("transfer_id", self.transfer_id)
+        if self.service_mode == DemandServiceMode.RESIDENT:
+            if (
+                self.effective_transfer_id is not None
+                or self.effective_transfer_action is not None
+            ):
+                raise TraceValidationError(
+                    "resident demand cannot name an effective transfer"
+                )
+        else:
+            require_text("effective_transfer_id", self.effective_transfer_id)
+            if self.effective_transfer_action not in {
+                LedgerAction.LOAD,
+                LedgerAction.PREFETCH,
+            }:
+                raise TraceValidationError(
+                    "H2D demand lacks an effective transfer action"
+                )
+            if (
+                self.service_mode == DemandServiceMode.START_H2D
+                and self.effective_transfer_action != self.action
+            ):
+                raise TraceValidationError(
+                    "new H2D transfer action differs from the requested action"
+                )
         _require_int("timestamp_ns", self.timestamp_ns)
         _require_int("runtime_event_count", self.runtime_event_count)
         if self.runtime_event_count != len(self.lifecycle_prefix):
@@ -912,6 +944,24 @@ class DurableCommitReceipt:
         _require_int("receipt event_count", self.event_count)
         require_sha256("receipt view_digest", self.view_digest)
         require_sha256("receipt batch_digest", self.batch_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class TraceStreamClosure:
+    """Durable identity of one finalized canonical trace stream."""
+
+    record_count: int
+    size_bytes: int
+    first_record_id: str
+    last_record_id: str
+    stream_digest: str
+
+    def __post_init__(self) -> None:
+        _require_int("trace closure record_count", self.record_count, minimum=1)
+        _require_int("trace closure size_bytes", self.size_bytes, minimum=1)
+        require_text("trace closure first_record_id", self.first_record_id)
+        require_text("trace closure last_record_id", self.last_record_id)
+        require_sha256("trace closure stream_digest", self.stream_digest)
 
 
 class CutoffCommitter(Protocol):
@@ -1768,44 +1818,40 @@ def validate_trace_for_labels(
     )
 
 
-def reconstruct_demand_label(
-    trace: ValidatedTrace,
-    observation_id: str,
-) -> DemandLabel:
-    """Derive policy-independent demand labels for one complete observation."""
+def reconstruct_demand_labels(trace: ValidatedTrace) -> tuple[DemandLabel, ...]:
+    """Derive every authorized demand label with one structural replay."""
 
     replayed = validate_trace(trace.records)
+    if not _has_label_authorization(trace):
+        raise TraceValidationError("labels require opaque evidence authorization")
+    lifecycle_receipt = trace.lifecycle_validation
+    schedule_receipt = trace.schedule_validation
+    if lifecycle_receipt is None or schedule_receipt is None:
+        raise TraceValidationError(
+            "labels are unavailable before lifecycle and schedule verification"
+        )
+    _validate_evidence_receipt(
+        replayed,
+        lifecycle_receipt,
+        evidence_name="lifecycle",
+        expected_role=EvidenceRole.LIFECYCLE,
+    )
+    _validate_evidence_receipt(
+        replayed,
+        schedule_receipt,
+        evidence_name="schedule",
+        expected_role=EvidenceRole.SCHEDULE,
+    )
+    header = _payload(replayed.header, TraceHeaderPayload)
+    if schedule_receipt.artifact_digest != header.schedule_digest:
+        raise TraceValidationError("schedule validation no longer matches the trace")
+
+    labels: list[DemandLabel] = []
     for observation in replayed.observations:
-        if observation.observation_id != observation_id:
-            continue
         terminal = _payload(observation.terminal, ObservationTerminalPayload)
         if terminal.status != TerminalStatus.COMPLETE:
-            raise TraceValidationError("labels are unavailable for non-complete data")
-        if not _has_label_authorization(trace):
-            raise TraceValidationError("labels require opaque evidence authorization")
-        lifecycle_receipt = trace.lifecycle_validation
-        schedule_receipt = trace.schedule_validation
-        if lifecycle_receipt is None or schedule_receipt is None:
-            raise TraceValidationError(
-                "labels are unavailable before lifecycle and schedule verification"
-            )
-        _validate_evidence_receipt(
-            replayed,
-            lifecycle_receipt,
-            evidence_name="lifecycle",
-            expected_role=EvidenceRole.LIFECYCLE,
-        )
-        _validate_evidence_receipt(
-            replayed,
-            schedule_receipt,
-            evidence_name="schedule",
-            expected_role=EvidenceRole.SCHEDULE,
-        )
-        header = _payload(replayed.header, TraceHeaderPayload)
-        if schedule_receipt.artifact_digest != header.schedule_digest:
-            raise TraceValidationError(
-                "schedule validation no longer matches the trace"
-            )
+            continue
+        observation_id = observation.observation_id
         if observation_id not in lifecycle_receipt.verified_observation_ids:
             raise TraceValidationError(
                 "lifecycle evidence did not authorize this label"
@@ -1821,12 +1867,37 @@ def reconstruct_demand_label(
                 "validated label contains duplicate reuse epochs"
             )
         epoch_count = len(epoch_ids)
-        return DemandLabel(
-            observation_id=observation_id,
-            first_demand=int(epoch_count > 0),
-            epoch_count=epoch_count,
-            repeat_count=max(0, epoch_count - int(epoch_count > 0)),
+        labels.append(
+            DemandLabel(
+                observation_id=observation_id,
+                first_demand=int(epoch_count > 0),
+                epoch_count=epoch_count,
+                repeat_count=max(0, epoch_count - int(epoch_count > 0)),
+            )
         )
+    return tuple(sorted(labels, key=lambda label: label.observation_id))
+
+
+def reconstruct_demand_label(
+    trace: ValidatedTrace,
+    observation_id: str,
+) -> DemandLabel:
+    """Derive one policy-independent demand label from an authorized trace."""
+
+    require_text("observation_id", observation_id)
+    replayed = validate_trace(trace.records)
+    for observation in replayed.observations:
+        if observation.observation_id != observation_id:
+            continue
+        terminal = _payload(observation.terminal, ObservationTerminalPayload)
+        if terminal.status != TerminalStatus.COMPLETE:
+            raise TraceValidationError("labels are unavailable for non-complete data")
+        break
+    else:
+        raise TraceValidationError(f"unknown observation: {observation_id}")
+    for label in reconstruct_demand_labels(trace):
+        if label.observation_id == observation_id:
+            return label
     raise TraceValidationError(f"unknown observation: {observation_id}")
 
 
@@ -1835,15 +1906,24 @@ def _read_regular_file(path: Path) -> bytes:
         before = path.lstat()
     except FileNotFoundError as exc:
         raise TraceValidationError(f"trace file is missing: {path}") from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise TraceValidationError("trace path must be a regular non-symlink file")
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+    ):
+        raise TraceValidationError(
+            "trace path must be a singly linked regular non-symlink file"
+        )
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+        if (before.st_dev, before.st_ino) != (
+            opened.st_dev,
+            opened.st_ino,
+        ) or opened.st_nlink != 1:
             raise TraceValidationError("trace file changed while opening")
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
             raw = stream.read(MAX_TRACE_BYTES + 1)
@@ -1858,7 +1938,10 @@ def _read_regular_file(path: Path) -> bytes:
             linked = path.lstat()
         except OSError as exc:
             raise TraceValidationError("trace path changed while reading") from exc
-        if (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino):
+        if (opened.st_dev, opened.st_ino) != (
+            linked.st_dev,
+            linked.st_ino,
+        ) or linked.st_nlink != 1:
             raise TraceValidationError("trace path changed while reading")
     finally:
         os.close(descriptor)
@@ -1902,11 +1985,15 @@ class DurableTraceWriter:
             self._parent_descriptor = os.open(parent, parent_flags)
         except OSError as exc:
             raise TraceDurabilityError("cannot open trace parent safely") from exc
-        parent_stat = os.fstat(self._parent_descriptor)
         try:
+            parent_stat = os.fstat(self._parent_descriptor)
             current_parent = parent.stat(follow_symlinks=False)
-        except OSError as exc:
-            os.close(self._parent_descriptor)
+        except BaseException as exc:
+            try:
+                os.close(self._parent_descriptor)
+            finally:
+                if not isinstance(exc, Exception):
+                    raise
             raise TraceDurabilityError("cannot revalidate trace parent") from exc
         if (parent_stat.st_dev, parent_stat.st_ino) != (
             current_parent.st_dev,
@@ -1936,7 +2023,11 @@ class DurableTraceWriter:
         self._state = TraceStateMachine()
         self._poisoned = False
         self._closed = False
+        self._sealed = False
         self._bytes_written = 0
+        self._record_count = 0
+        self._first_record_id: str | None = None
+        self._last_record_id: str | None = None
         self._file_identity: tuple[int, int] | None = None
         self._expected_mtime_ns = 0
         self._expected_ctime_ns = 0
@@ -1948,11 +2039,17 @@ class DurableTraceWriter:
             self._file_identity = (current.st_dev, current.st_ino)
             self._expected_mtime_ns = current.st_mtime_ns
             self._expected_ctime_ns = current.st_ctime_ns
-        except OSError as exc:
+        except BaseException as exc:
             self._poisoned = True
-            os.close(self._descriptor)
-            os.close(self._parent_descriptor)
-            self._closed = True
+            try:
+                os.close(self._descriptor)
+            finally:
+                try:
+                    os.close(self._parent_descriptor)
+                finally:
+                    self._closed = True
+            if not isinstance(exc, Exception):
+                raise
             raise TraceCommitIndeterminateError(
                 "trace creation durability is indeterminate"
             ) from exc
@@ -1980,6 +2077,18 @@ class DurableTraceWriter:
         if opened.st_size != expected_size:
             raise OSError("trace file size changed outside the writer")
         return opened
+
+    @property
+    def poisoned(self) -> bool:
+        """Return whether a possibly durable failure invalidated this writer."""
+
+        return self._poisoned
+
+    @property
+    def sealed(self) -> bool:
+        """Return whether the trace state machine has been durably finalized."""
+
+        return self._sealed
 
     def _checked_stream_digest(
         self,
@@ -2034,6 +2143,8 @@ class DurableTraceWriter:
         with self._lock:
             if self._closed:
                 raise TraceDurabilityError("trace writer is closed")
+            if self._sealed:
+                raise TraceDurabilityError("trace writer is finalized")
             if self._poisoned:
                 raise TraceCommitIndeterminateError("trace writer is poisoned")
             if not isinstance(records, tuple) or not records:
@@ -2069,8 +2180,10 @@ class DurableTraceWriter:
             written = 0
             try:
                 self._assert_unchanged()
-            except OSError as exc:
+            except BaseException as exc:
                 self._poisoned = True
+                if not isinstance(exc, Exception):
+                    raise
                 raise TraceDurabilityError(
                     "trace file changed outside the writer"
                 ) from exc
@@ -2088,17 +2201,76 @@ class DurableTraceWriter:
                 )
                 if stream_digest != staged_stream_hasher.hexdigest():
                     raise OSError("trace committed prefix differs from staged bytes")
-            except OSError as exc:
+                self._bytes_written += written
+                self._record_count += len(canonical_records)
+                if self._first_record_id is None:
+                    self._first_record_id = canonical_records[0].record_id
+                self._last_record_id = canonical_records[-1].record_id
+                self._expected_mtime_ns = current.st_mtime_ns
+                self._expected_ctime_ns = current.st_ctime_ns
+                self._stream_hasher = staged_stream_hasher
+                self._state = staged
+                return receipt
+            except BaseException as exc:
                 self._poisoned = True
+                if not isinstance(exc, Exception):
+                    raise
                 raise TraceCommitIndeterminateError(
                     "trace append durability is indeterminate"
                 ) from exc
-            self._bytes_written += written
-            self._expected_mtime_ns = current.st_mtime_ns
-            self._expected_ctime_ns = current.st_ctime_ns
-            self._stream_hasher = staged_stream_hasher
-            self._state = staged
-            return receipt
+
+    def _seal_locked(self) -> TraceStreamClosure:
+        if self._closed:
+            raise TraceDurabilityError("trace writer is closed")
+        if self._poisoned:
+            raise TraceCommitIndeterminateError("trace writer is poisoned")
+        if self._sealed:
+            try:
+                self._assert_unchanged()
+            except BaseException as exc:
+                self._poisoned = True
+                if not isinstance(exc, Exception):
+                    raise
+                raise TraceCommitIndeterminateError(
+                    "sealed trace identity changed before close"
+                ) from exc
+            assert self._first_record_id is not None
+            assert self._last_record_id is not None
+            return TraceStreamClosure(
+                record_count=self._record_count,
+                size_bytes=self._bytes_written,
+                first_record_id=self._first_record_id,
+                last_record_id=self._last_record_id,
+                stream_digest=self._stream_hasher.hexdigest(),
+            )
+        self._state.finalize()
+        try:
+            self._assert_unchanged()
+            os.fsync(self._descriptor)
+            os.fsync(self._parent_descriptor)
+        except BaseException as exc:
+            self._poisoned = True
+            if not isinstance(exc, Exception):
+                raise
+            raise TraceCommitIndeterminateError(
+                "trace finalization durability is indeterminate"
+            ) from exc
+        if self._first_record_id is None or self._last_record_id is None:
+            raise TraceValidationError("finalized trace has no committed records")
+        self._sealed = True
+        return TraceStreamClosure(
+            record_count=self._record_count,
+            size_bytes=self._bytes_written,
+            first_record_id=self._first_record_id,
+            last_record_id=self._last_record_id,
+            stream_digest=self._stream_hasher.hexdigest(),
+        )
+
+    def seal(self) -> TraceStreamClosure:
+        """Finalize the state machine and return its durable stream identity."""
+
+        with self._lock:
+            return self._seal_locked()
 
     def close(self, *, finalize: bool = True) -> None:
         with self._lock:
@@ -2106,15 +2278,19 @@ class DurableTraceWriter:
                 return
             try:
                 if finalize and not self._poisoned:
-                    self._state.finalize()
-                if not self._poisoned:
+                    self._seal_locked()
+                elif not self._poisoned:
                     self._assert_unchanged()
-                os.fsync(self._descriptor)
-                os.fsync(self._parent_descriptor)
+                    os.fsync(self._descriptor)
+                    os.fsync(self._parent_descriptor)
             finally:
-                os.close(self._descriptor)
-                os.close(self._parent_descriptor)
-                self._closed = True
+                try:
+                    os.close(self._descriptor)
+                finally:
+                    try:
+                        os.close(self._parent_descriptor)
+                    finally:
+                        self._closed = True
 
     def __enter__(self) -> DurableTraceWriter:
         return self

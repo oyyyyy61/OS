@@ -83,10 +83,13 @@ calibration thresholds for an excluded pilot before formal preregistration.
 The current pre-data v3 trace contract includes lifecycle-event v2, exact
 atomic batch coordinates, binding and H2D waiter transitions, block boundary
 snapshots, full transfer-history reconciliation, a sole-writer lifecycle stream
-seal, and a create-only lifecycle sidecar with independent replay. C1-B0
-remains open until the operation-typed durable trace committer and segmented
-final evidence seal are implemented and tested; that bundle-level seal is
-separate from the implemented lifecycle stream seal.
+seal, and a create-only lifecycle sidecar with independent replay. The
+operation-typed durable committer, formal runtime endpoints, and segmented
+create-only C1-B0 bundle are now implemented with focused fault, tamper,
+concurrency, and fresh-process replay tests. Their serialized status is limited
+to `C1_B0_SCHEMA_RECONSTRUCTION_COMPONENT_VERIFIED`. C1-B0 stage acceptance
+still requires a bundle produced from a clean committed source snapshot and an
+independently published external anchor; C1-B1 through C1-B4 remain open.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint

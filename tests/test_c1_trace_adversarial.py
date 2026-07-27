@@ -692,6 +692,34 @@ def test_writer_detects_external_append_before_next_batch(
         writer.close(finalize=False)
 
 
+def test_writer_creation_base_exception_closes_both_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = (tmp_path / "creation-base-exception.jsonl").resolve()
+    real_close = trace_module.os.close
+    closed_descriptors: list[int] = []
+
+    class InjectedAbort(BaseException):
+        pass
+
+    def fail_fsync(_descriptor: int) -> None:
+        raise InjectedAbort("injected creation abort")
+
+    def record_close(descriptor: int) -> None:
+        closed_descriptors.append(descriptor)
+        real_close(descriptor)
+
+    with monkeypatch.context() as context:
+        context.setattr(trace_module.os, "fsync", fail_fsync)
+        context.setattr(trace_module.os, "close", record_close)
+        with pytest.raises(InjectedAbort, match="creation abort"):
+            DurableTraceWriter(path)
+
+    assert path.exists()
+    assert len(closed_descriptors) == 2
+
+
 def test_writer_receipt_preserves_trace_sequence_order(
     tmp_path: Path,
     block_key: BlockKey,

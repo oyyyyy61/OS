@@ -95,11 +95,15 @@ stream with its own monotonic timestamp; no caller-provided closure time is
 trusted. Detached replay checks complete batches, exact binding/waiter lineage,
 block state, and every terminal transfer record before the component gate can
 issue a lifecycle receipt. Formal label authorization additionally requires the
-still-open bundle manifest and final evidence seal. The live auditor reconciles
-those projections against the runtime, and any exception while applying an
-already committed transition poisons the writer and prevents later mutation or
-sealing. The accepted M2 result remains bound to its frozen v1 artifacts; the
-pre-data v2 extension does not rewrite or broaden that historical acceptance.
+typed operation chain, fixed three-segment manifest, one-shot finalization
+attempt marker, final evidence seal, and external protocol/verifier/
+implementation/environment anchors. The controlled-replay C1-B0 component
+implements those checks; its status and open-gate list prevent it from closing
+later calibration or performance gates. The live auditor reconciles those
+projections against the runtime, and any exception while applying an already
+committed transition poisons the writer and prevents later mutation or sealing.
+The accepted M2 result remains bound to its frozen v1 artifacts; the pre-data
+v2 extension does not rewrite or broaden that historical acceptance.
 
 Logical owner bindings in DAGKV attach to immutable content, so they can remain
 valid while that content moves between tiers. This is an explicit schema delta

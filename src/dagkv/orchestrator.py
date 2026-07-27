@@ -2,21 +2,35 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from threading import RLock
+from threading import RLock, get_ident
 from time import monotonic_ns
 
+from dagkv.c1_commit import (
+    AttemptPayload,
+    CanonicalTraceCommitter,
+    CommittedCutoff,
+    CommittedDemandDispatch,
+    CutoffCommitRequest,
+    DemandCommitRequest,
+    TraceOperationKind,
+    WriterIssuedCommitReceipt,
+)
 from dagkv.c1_leases import LeaseOwnerSnapshot, SharedLeasePolicySnapshot
 from dagkv.c1_trace import (
     AtomicCutoffView,
     CutoffCommitter,
     DemandCommitter,
+    DemandServiceMode,
     DurableCommitReceipt,
     PreServiceDemandView,
     WaiterIdentity,
+    canonical_digest,
+    canonical_json,
+    parse_canonical_dataclass,
 )
 from dagkv.domain import (
     AuditReport,
@@ -59,6 +73,15 @@ from dagkv.domain import (
 from dagkv.ledger import EventDraft, EventLedger
 
 
+def _safe_failure_detail(operation: str, exc: BaseException) -> str:
+    """Format diagnostics without weakening a fail-closed poison boundary."""
+
+    try:
+        return f"{operation}: {type(exc).__name__}: {exc}"
+    except BaseException:
+        return f"{operation}: unprintable failure"
+
+
 @dataclass(frozen=True, slots=True)
 class _BindingReleasePlan:
     """Ephemeral transition plan committed only after one ledger batch passes."""
@@ -71,6 +94,28 @@ class _BindingReleasePlan:
     reason: str
 
 
+@dataclass(slots=True)
+class _FormalDemandAdapter:
+    """Bridge the legacy locked barrier to one frozen typed committer."""
+
+    committer: CanonicalTraceCommitter
+    request: DemandCommitRequest
+    receipt: WriterIssuedCommitReceipt | None = None
+    view: PreServiceDemandView | None = None
+
+    def commit_demands(self, view: PreServiceDemandView) -> DurableCommitReceipt:
+        receipt = self.committer.commit_demands(self.request, view)
+        self.receipt = receipt
+        self.view = view
+        commit = receipt.commit
+        return DurableCommitReceipt(
+            record_ids=commit.record_ids,
+            event_count=commit.runtime_event_count,
+            view_digest=commit.runtime_view_digest,
+            batch_digest=commit.batch_digest,
+        )
+
+
 class LifecycleOrchestrator:
     """Own every mutable lifecycle registry behind one atomic writer lock."""
 
@@ -81,11 +126,24 @@ class LifecycleOrchestrator:
         phase: str = "m2_component",
         source: str = "dagkv.orchestrator",
         trace_required: bool = False,
+        formal_trace_committer: CanonicalTraceCommitter | None = None,
     ) -> None:
         if type(trace_required) is not bool:
             raise IdentityError("trace_required must be a bool")
+        if formal_trace_committer is not None:
+            if type(formal_trace_committer) is not CanonicalTraceCommitter:
+                raise IdentityError(
+                    "formal trace committer must be the canonical concrete writer"
+                )
+            if not trace_required:
+                raise IdentityError("formal trace committer requires trace_required")
+            if formal_trace_committer.run_id != run_id:
+                raise IdentityError("formal trace committer belongs to another run")
         self._lock = RLock()
         self._trace_callback_active = False
+        self._formal_trace_entry_thread_id: int | None = None
+        self._formal_trace_committer = formal_trace_committer
+        self._runtime_poisoned: str | None = None
         self._ledger = EventLedger(
             run_id=run_id,
             phase=phase,
@@ -115,6 +173,14 @@ class LifecycleOrchestrator:
         ] = {}
         self._demand_id_by_execution: dict[ExecutionRef, str] = {}
         self._dispatched_demand_ids: set[str] = set()
+        self._formal_demand_commits: dict[
+            str,
+            tuple[
+                str,
+                PreServiceDemandView,
+                WriterIssuedCommitReceipt,
+            ],
+        ] = {}
         # Monotonic: removing an active waiter must not erase prior service.
         self._transfer_waiter_history: set[str] = set()
         self._transfers: dict[str, Transfer] = {}
@@ -124,7 +190,6 @@ class LifecycleOrchestrator:
         self._slot_generations: dict[tuple[Tier, str, str], int] = {}
         self._slot_occupants: dict[tuple[Tier, str, str], ReplicaId] = {}
         self._hard_failures: list[str] = []
-        self._runtime_poisoned: str | None = None
         self._seal_event: LifecycleEvent | None = None
 
     @property
@@ -132,7 +197,7 @@ class LifecycleOrchestrator:
         """Return an immutable ledger snapshot."""
 
         with self._lock:
-            return self._ledger.events
+            return deepcopy(self._ledger.events)
 
     def workflow_snapshot(self, key: WorkflowKey) -> WorkflowRecord:
         """Return a detached workflow snapshot."""
@@ -165,8 +230,9 @@ class LifecycleOrchestrator:
         """Close the lifecycle stream at a sole-writer monotonic-clock boundary."""
 
         with self._lock:
+            self._guard_runtime_health()
             if self._seal_event is not None:
-                return self._seal_event
+                return deepcopy(self._seal_event)
             self._guard_runtime_mutation()
             report = self.audit()
             if not report.passed:
@@ -178,17 +244,31 @@ class LifecycleOrchestrator:
                 raise StateTransitionError(
                     "monotonic seal clock predates the lifecycle stream"
                 )
-            event = self._ledger.append(
-                EventDraft(
-                    action=LedgerAction.STREAM_SEAL,
-                    status=LedgerStatus.COMPLETED,
-                    reason="lifecycle_stream_closed",
-                    timestamp_ns=timestamp_ns,
-                    operation_id="lifecycle-stream-seal",
+            before_events = deepcopy(self._ledger.events)
+            try:
+                event = self._ledger.append(
+                    EventDraft(
+                        action=LedgerAction.STREAM_SEAL,
+                        status=LedgerStatus.COMPLETED,
+                        reason="lifecycle_stream_closed",
+                        timestamp_ns=timestamp_ns,
+                        operation_id="lifecycle-stream-seal",
+                    )
                 )
-            )
-            self._seal_event = event
-            return event
+                self._seal_event = event
+                return deepcopy(event)
+            except BaseException as exc:
+                if self._ledger.events != before_events:
+                    if self._formal_trace_committer is not None:
+                        self._poison_formal_trace("seal lifecycle", exc)
+                    elif self._runtime_poisoned is None:
+                        self._runtime_poisoned = (
+                            "lifecycle seal outcome is indeterminate"
+                        )
+                        self._runtime_poisoned = _safe_failure_detail(
+                            "seal lifecycle", exc
+                        )
+                raise
 
     def shared_lease_policy_snapshot(
         self,
@@ -213,6 +293,10 @@ class LifecycleOrchestrator:
     ) -> tuple[AtomicCutoffView, DurableCommitReceipt]:
         """Durably bind one forecast attempt to an atomic runtime prefix."""
 
+        if self._formal_trace_committer is not None:
+            raise StateTransitionError(
+                "formal trace runtime requires commit_shared_lease_cutoff_traced"
+            )
         self._guard_runtime_mutation()
         with self._lock:
             self._guard_runtime_mutation()
@@ -243,6 +327,89 @@ class LifecycleOrchestrator:
                 view_digest=view.view_digest,
             )
             return view, receipt
+
+    def commit_shared_lease_cutoff_traced(
+        self,
+        key: BlockKey,
+        *,
+        cutoff_ns: int,
+        horizon_duration_ns: int,
+        operation_id: str,
+        observation_id: str,
+        attempt_factory: Callable[[AtomicCutoffView], AttemptPayload],
+    ) -> CommittedCutoff:
+        """Create the model attempt and its trace records under one writer lock."""
+
+        committer = self._require_formal_trace_committer()
+        require_text("cutoff operation_id", operation_id)
+        require_text("cutoff observation_id", observation_id)
+        if not callable(attempt_factory):
+            raise IdentityError("attempt_factory must be callable")
+        self._guard_runtime_mutation()
+        with self._lock:
+            self._guard_runtime_mutation()
+            view = self._atomic_cutoff_view_locked(
+                key,
+                cutoff_ns=cutoff_ns,
+                horizon_duration_ns=horizon_duration_ns,
+            )
+            if self._trace_callback_active:
+                raise StateTransitionError("trace committer callback cannot reenter")
+            self._trace_callback_active = True
+            try:
+                attempt_view = deepcopy(view)
+                attempt = attempt_factory(attempt_view)
+                if attempt_view != view:
+                    raise StateTransitionError(
+                        "attempt factory changed the detached cutoff view"
+                    )
+                request = parse_canonical_dataclass(
+                    canonical_json(
+                        CutoffCommitRequest(
+                            operation_id=operation_id,
+                            observation_id=observation_id,
+                            attempt=attempt,
+                        )
+                    ),
+                    CutoffCommitRequest,
+                    artifact_name="formal cutoff request",
+                    max_bytes=64 * 1024 * 1024,
+                )
+                committed_attempt = deepcopy(request.attempt)
+                receipt = committer.commit_cutoff(request, view)
+                current = self._atomic_cutoff_view_locked(
+                    key,
+                    cutoff_ns=cutoff_ns,
+                    horizon_duration_ns=horizon_duration_ns,
+                )
+                if current != view:
+                    raise StateTransitionError(
+                        "typed cutoff commit changed the atomic runtime view"
+                    )
+                committer.verify_receipt(
+                    receipt,
+                    kind=TraceOperationKind.CUTOFF_ATTEMPT,
+                    operation_id=operation_id,
+                    runtime_event_count=len(view.lifecycle_prefix),
+                    runtime_view_digest=view.view_digest,
+                )
+                return CommittedCutoff(
+                    view=deepcopy(view),
+                    attempt=committed_attempt,
+                    receipt=receipt,
+                )
+            except BaseException as exc:
+                if (
+                    committer.poisoned_reason is not None
+                    or committer.operation_committed(
+                        operation_id,
+                        TraceOperationKind.CUTOFF_ATTEMPT,
+                    )
+                ):
+                    self._poison_formal_trace("commit cutoff", exc)
+                raise
+            finally:
+                self._trace_callback_active = False
 
     def register_workflow(self, spec: WorkflowSpec) -> bool:
         """Register one immutable DAG, initializing roots as ready."""
@@ -1061,6 +1228,13 @@ class LifecycleOrchestrator:
         access batch. Reuse is limited to an event-free replay of that batch.
         """
 
+        if (
+            self._formal_trace_committer is not None
+            and self._formal_trace_entry_thread_id != get_ident()
+        ):
+            raise StateTransitionError(
+                "formal trace runtime requires ensure_h2d_traced"
+            )
         self._guard_runtime_mutation()
         if target_replica.tier != Tier.GPU:
             raise IdentityError("H2D target must be GPU")
@@ -1303,6 +1477,121 @@ class LifecycleOrchestrator:
             if demand_commit_id is not None:
                 self._dispatched_demand_ids.add(demand_commit_id)
             return command
+
+    def ensure_h2d_traced(
+        self,
+        block_key: BlockKey,
+        target_replica: ReplicaId,
+        waiter_handles: Iterable[BindingHandle],
+        *,
+        transfer_id: str,
+        timestamp_ns: int,
+        request: DemandCommitRequest,
+        action: LedgerAction = LedgerAction.LOAD,
+        reason: str = "owner_readmission",
+    ) -> CommittedDemandDispatch:
+        """Run one pre-service demand commit through the frozen typed writer."""
+
+        committer = self._require_formal_trace_committer()
+        if type(request) is not DemandCommitRequest:
+            raise IdentityError("formal demand request has the wrong type")
+        request_snapshot = deepcopy(request)
+        request_digest = canonical_digest(request_snapshot)
+        waiter_handles_tuple = tuple(waiter_handles)
+        self._guard_runtime_mutation()
+        with self._lock:
+            self._guard_runtime_mutation()
+            prior = self._formal_demand_commits.get(request_snapshot.operation_id)
+            if prior is not None:
+                prior_request_digest, prior_view, prior_receipt = prior
+                if prior_request_digest != request_digest:
+                    raise IdentityError(
+                        "formal demand operation was reused for another request"
+                    )
+                committer.verify_receipt(
+                    prior_receipt,
+                    kind=TraceOperationKind.DEMAND_INTENT,
+                    operation_id=request_snapshot.operation_id,
+                    runtime_event_count=prior_view.runtime_event_count,
+                    runtime_view_digest=prior_view.view_digest,
+                )
+                before_events = self._ledger.events
+                self._enter_formal_trace_endpoint()
+                try:
+                    command = self.ensure_h2d(
+                        block_key,
+                        target_replica,
+                        waiter_handles_tuple,
+                        transfer_id=transfer_id,
+                        timestamp_ns=timestamp_ns,
+                        action=action,
+                        reason=reason,
+                        demand_commit_id=request_snapshot.operation_id,
+                    )
+                    if self._ledger.events != before_events:
+                        error = StateTransitionError(
+                            "formal demand replay appended lifecycle events"
+                        )
+                        self._poison_formal_trace("replay demand", error)
+                        raise error
+                    return CommittedDemandDispatch(
+                        command=command,
+                        receipt=prior_receipt,
+                        replayed=True,
+                    )
+                finally:
+                    self._leave_formal_trace_endpoint()
+
+            adapter = _FormalDemandAdapter(
+                committer=committer,
+                request=request_snapshot,
+            )
+            self._enter_formal_trace_endpoint()
+            try:
+                command = self.ensure_h2d(
+                    block_key,
+                    target_replica,
+                    waiter_handles_tuple,
+                    transfer_id=transfer_id,
+                    timestamp_ns=timestamp_ns,
+                    action=action,
+                    reason=reason,
+                    demand_commit_id=request_snapshot.operation_id,
+                    demand_committer=adapter,
+                )
+                if adapter.receipt is None or adapter.view is None:
+                    raise StateTransitionError(
+                        "formal demand service returned without a typed receipt"
+                    )
+                committer.verify_receipt(
+                    adapter.receipt,
+                    kind=TraceOperationKind.DEMAND_INTENT,
+                    operation_id=request_snapshot.operation_id,
+                    runtime_event_count=adapter.view.runtime_event_count,
+                    runtime_view_digest=adapter.view.view_digest,
+                )
+                self._formal_demand_commits[request_snapshot.operation_id] = (
+                    request_digest,
+                    deepcopy(adapter.view),
+                    adapter.receipt,
+                )
+                return CommittedDemandDispatch(
+                    command=command,
+                    receipt=adapter.receipt,
+                    replayed=False,
+                )
+            except BaseException as exc:
+                if (
+                    committer.poisoned_reason is not None
+                    or committer.operation_committed(
+                        request_snapshot.operation_id,
+                        TraceOperationKind.DEMAND_INTENT,
+                    )
+                ):
+                    self._poison_formal_trace("dispatch demand", exc)
+                raise
+            finally:
+                self._leave_formal_trace_endpoint()
 
     def complete_transfer(
         self,
@@ -1887,7 +2176,7 @@ class LifecycleOrchestrator:
         cutoff_ns: int,
         horizon_duration_ns: int,
     ) -> AtomicCutoffView:
-        lifecycle_prefix = self._ledger.events
+        lifecycle_prefix = deepcopy(self._ledger.events)
         snapshot = self._shared_lease_policy_snapshot_locked(
             key,
             runtime_event_count=len(lifecycle_prefix),
@@ -1919,12 +2208,52 @@ class LifecycleOrchestrator:
         if receipt.view_digest != view_digest:
             raise StateTransitionError("trace receipt view digest differs from runtime")
 
-    def _guard_runtime_mutation(self) -> None:
-        if self._runtime_poisoned is not None:
+    def _require_formal_trace_committer(self) -> CanonicalTraceCommitter:
+        committer = self._formal_trace_committer
+        if committer is None:
             raise StateTransitionError(
-                f"runtime is poisoned after a committed apply failure: "
-                f"{self._runtime_poisoned}"
+                "formal traced endpoint requires a configured canonical committer"
             )
+        return committer
+
+    def _enter_formal_trace_endpoint(self) -> None:
+        if self._formal_trace_entry_thread_id is not None:
+            raise StateTransitionError("formal trace endpoint cannot reenter")
+        self._formal_trace_entry_thread_id = get_ident()
+
+    def _leave_formal_trace_endpoint(self) -> None:
+        if self._formal_trace_entry_thread_id == get_ident():
+            self._formal_trace_entry_thread_id = None
+
+    def _poison_formal_trace(self, operation: str, exc: BaseException) -> None:
+        if self._runtime_poisoned is None:
+            self._runtime_poisoned = "formal trace attempt poisoned"
+            self._runtime_poisoned = _safe_failure_detail(operation, exc)
+        committer = self._formal_trace_committer
+        if committer is not None:
+            try:
+                committer.abort()
+            except BaseException as abort_exc:
+                self._runtime_poisoned = (
+                    f"{self._runtime_poisoned}; trace abort failed: "
+                    f"{_safe_failure_detail('trace abort', abort_exc)}"
+                )
+
+    def _guard_runtime_health(self) -> None:
+        committer = self._formal_trace_committer
+        if (
+            committer is not None
+            and committer.poisoned_reason is not None
+            and self._runtime_poisoned is None
+        ):
+            self._runtime_poisoned = (
+                f"canonical trace committer failed: {committer.poisoned_reason}"
+            )
+        if self._runtime_poisoned is not None:
+            raise StateTransitionError(f"runtime is poisoned: {self._runtime_poisoned}")
+
+    def _guard_runtime_mutation(self) -> None:
+        self._guard_runtime_health()
         if self._seal_event is not None:
             raise StateTransitionError("lifecycle stream is sealed")
         if self._trace_callback_active:
@@ -1939,11 +2268,16 @@ class LifecycleOrchestrator:
         try:
             yield
         except BaseException as exc:
-            issue = (
-                f"post-ledger runtime apply failed for {operation}: "
-                f"{type(exc).__name__}: {exc}"
+            issue = _safe_failure_detail(
+                f"post-ledger runtime apply failed for {operation}", exc
             )
-            self._runtime_poisoned = issue
+            if self._formal_trace_committer is not None:
+                self._poison_formal_trace(
+                    f"post-ledger runtime apply failed for {operation}", exc
+                )
+            else:
+                self._runtime_poisoned = "post-ledger runtime apply failed"
+                self._runtime_poisoned = issue
             self._hard_failures.append(issue)
             raise
 
@@ -2398,12 +2732,28 @@ class LifecycleOrchestrator:
                     state=binding.state,
                 )
             )
+        gpu = block.replicas.get(Tier.GPU)
+        if gpu is not None:
+            service_mode = DemandServiceMode.RESIDENT
+            effective_transfer_id = None
+            effective_transfer_action = None
+        elif block.inflight_transfer_id is not None:
+            active_transfer = self._transfer(block.inflight_transfer_id)
+            service_mode = DemandServiceMode.JOIN_ACTIVE_H2D
+            effective_transfer_id = active_transfer.transfer_id
+            effective_transfer_action = active_transfer.action
+        else:
+            service_mode = DemandServiceMode.START_H2D
+            effective_transfer_id = transfer_id
+            effective_transfer_action = action
         return PreServiceDemandView(
             block_key=block.block_key,
             demand_commit_id=demand_commit_id,
             target_replica=target_replica,
             action=action,
-            transfer_id=transfer_id,
+            service_mode=service_mode,
+            effective_transfer_id=effective_transfer_id,
+            effective_transfer_action=effective_transfer_action,
             timestamp_ns=timestamp_ns,
             lifecycle_prefix=lifecycle_prefix,
             runtime_event_count=len(lifecycle_prefix),

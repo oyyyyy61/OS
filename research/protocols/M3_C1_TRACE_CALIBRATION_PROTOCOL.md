@@ -665,3 +665,40 @@ committer, segmented bundle-level evidence seal, branch-grammar validator, and
 split/leakage gates remain open. The bundle-level seal is distinct from the
 implemented lifecycle stream seal. No pilot or formal probability result has
 been collected under v3.
+
+### Fourth Foundation Slice: Typed Commit And Component Bundle
+
+The operation-typed canonical committer now owns record construction and the
+create-only JSONL writer. It commits cutoff plus forecast attempt atomically,
+derives demand intents from the frozen schedule before service, closes each
+observation in one terminal batch, returns exact writer-issued receipts, and
+rejects legacy trace endpoints in formal runtime mode. Requests, runtime views,
+the schedule, and the trace envelope are canonical detached snapshots. Any
+possibly durable response loss, post-commit application failure, receipt
+mutation, lifecycle-seal ambiguity, or sealed-file drift poisons the complete
+attempt.
+
+The controlled-replay C1-B0 component bundle has a fixed schedule, lifecycle,
+and trace segment chain; a durable one-shot attempt marker bound to the initial
+payload hashes; typed operation boundaries; a manifest; and an externally
+anchored final seal. Fresh validation rereads the exact read-only inventory,
+recomputes byte and sequence boundaries with a linear hash chain, replays the
+concrete lifecycle and schedule gates, and batch-reconstructs labels. Its only
+success status is `C1_B0_SCHEMA_RECONSTRUCTION_COMPONENT_VERIFIED`, with C1-B1
+through C1-D listed as open gates. Natural-schedule evidence is not admitted by
+this component bundle.
+
+The final-seal, protocol, verifier, implementation, and environment digests are
+trust roots only when an independent launcher computes them. The external
+evidence index must publish the final-seal digest only after the finalizer
+returns successfully; an indeterminate finalization publishes no anchor. The
+v3 demand-operation `runtime_view_digest` remains a trusted-writer assertion
+because the full pre-service view is not duplicated in the trace. Demand labels
+are still independently authorized from the frozen schedule, demand-intent
+rows, and lifecycle prefixes and service terminals.
+
+This slice does not yet accept the C1-B0 stage. Acceptance still requires a
+fresh bundle from the clean committed implementation and an external evidence
+index. Branch grammar and split/leakage remain C1-B1 gates; no excluded pilot,
+calibration artifact, formal probability result, GPU result, or performance
+claim has been produced.

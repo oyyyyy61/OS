@@ -120,6 +120,15 @@ actual H2D is reserved for later policy evaluation, and every numerical
 success threshold apart from the frozen inferential error rates remains open
 until an excluded pilot is complete.
 
+The C1-B0 operation-typed committer, formal runtime barrier, and controlled-
+replay segmented bundle are implemented and pass focused component replay and
+fault tests. This is `C1_B0_SCHEMA_RECONSTRUCTION_COMPONENT_VERIFIED`, not C1-B0
+stage acceptance. A clean committed source identity, independently computed
+protocol/verifier/implementation/environment anchors, and an external evidence
+index published only after successful finalization remain required. C1-B1
+split/grammar and leakage checks, B2 pilot, B3 freeze, B4 formal coverage,
+C1-C policy effects, and C1-D GPU measurements remain open.
+
 M3 must additionally implement an explicitly derived capacity/DMA-constrained
 joint controller (C2) and deadline-aware partial-prefix single-flight (C3).
 Each mechanism requires an independent switch, matched first-order baselines,
