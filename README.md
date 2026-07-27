@@ -105,6 +105,17 @@ distributions, and imported module origins, and generates plus replays the
 inner bundle in separate processes. The launcher publishes only outside the
 repository and does not authorize B1 calibration or any GPU/performance claim.
 
+The first C1-B1 implementation slice now provides canonical cutoff plans,
+slot-conserving candidate universes, source-digest-bound template/content
+cohort-token catalogs, seedless lineage-component role assignment, temporal
+guard checks, separate predecessor-exclusion artifacts, and a fresh
+PILOT-to-main union audit. All artifacts use canonical create-only storage with
+stable replay and fail-closed I/O classification. External catalog membership
+remains a B1 bundle-replay obligation. This is a structural component
+checkpoint. Branch grammar, feature/provenance leakage, baseline parity,
+candidate realization, the B1 bundle, and clean-source B1 acceptance evidence
+remain open; no excluded-pilot observation has been collected.
+
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint
 controller (C2), and deadline-aware partial-prefix single-flight (C3).
