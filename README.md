@@ -124,12 +124,18 @@ windowed lifecycle-prefix leaves. Schedule paths remain label-side or forbidden
 for the corresponding observation, and the post-attempt cutoff trace row cannot
 source its own feature-view digest. Static cutoff-state inputs therefore remain
 closed until a separately committed pre-attempt source and receipt are
-versioned.
-Independent replay from raw sources into grammar projections and feature
-values/times, enforcement of negative fixtures and planned-pilot no-go states,
-transitive derivation and role leakage, baseline parity, candidate realization,
-the B1 bundle, and clean-source B1 acceptance evidence remain open; no
-excluded-pilot observation has been collected.
+versioned. The fourth slice adds a finite typed derivation registry, exact
+source-all and derived-one selectors, content-addressed source and derived
+values, strict opcode semantics, iterative DAG validation, frozen resource
+ceilings, and complete one-node-per-entry replay. Dependency IDs are
+reconstructed from selectors; callers cannot supply a subset or ordering. This
+does not establish that a raw source tuple is complete: the pre-attempt prefix
+receipt and exact Cartesian product of eligible events and nine rules remain
+the next feature-view gate. Independent replay from raw sources into grammar
+projections and the complete feature view, enforcement of negative fixtures
+and planned-pilot no-go states, recursive role leakage, baseline parity,
+candidate realization, the B1 bundle, and clean-source B1 acceptance evidence
+remain open; no excluded-pilot observation has been collected.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint

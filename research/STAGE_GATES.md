@@ -135,7 +135,7 @@ schema/reconstruction correctness. C1-B1 split/grammar and leakage checks, B2
 pilot, B3 freeze, B4 formal coverage, C1-C policy effects, and C1-D GPU
 measurements remain open.
 
-The first three C1-B1 structural implementation checkpoints now close the
+The first four C1-B1 structural implementation checkpoints now close the
 code-level candidate-universe, cohort-token, connected-component split,
 temporal guard, predecessor-exclusion, and PILOT-to-main union-audit mechanics,
 plus bounded finite-DNF enumeration, content-addressed assignment/outcome
@@ -147,11 +147,16 @@ boundary admits nine windowed lifecycle-prefix leaves; schedule paths and the
 post-attempt cutoff trace row cannot act as current-observation inputs. A
 versioned pre-attempt source is still required before any static cutoff-state
 field can be opened. The C1-B1 stage remains open until raw source cases
-independently reproduce each grammar projection and feature value/time,
-negative fixtures and planned-pilot no-go states are enforced, and transitive
-derivation and role leakage, baseline parity, candidate realization, the fixed
-bundle, and clean-source replay all satisfy the v4 gate. These checkpoints
-authorize no pilot, probability, policy, GPU, or performance claim.
+independently reproduce each grammar projection and feature value/time. The
+fourth checkpoint closes the finite typed derivation registry, source-all and
+derived-one selectors, exact opcode semantics, iterative DAG replay, frozen
+resource ceilings, content-addressed values, and one node per registry entry.
+It does not prove the raw source universe: the pre-attempt prefix receipt and
+exact Cartesian product of eligible events and nine rules remain open.
+Negative fixtures and planned-pilot no-go states, recursive role leakage,
+baseline parity, candidate realization, the fixed bundle, and clean-source
+replay must still satisfy the v4 gate. These checkpoints authorize no pilot,
+probability, policy, GPU, or performance claim.
 
 The clean-source acceptance launcher is
 `tools/run_m3_c1_b0_evidence.py`. It freezes 192 focused testcase identities

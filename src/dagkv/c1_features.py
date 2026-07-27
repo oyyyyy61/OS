@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import types
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, fields, is_dataclass
 from enum import StrEnum
@@ -1552,6 +1553,22 @@ def build_feature_contract(
     )
 
 
+def validate_feature_contract(contract: FeatureContract) -> None:
+    """Replay a feature contract and recheck every embedded dependency."""
+
+    if type(contract) is not FeatureContract:
+        raise TraceValidationError("feature contract has the wrong type")
+    raw = canonical_json(contract)
+    replayed = parse_canonical_dataclass(
+        raw,
+        FeatureContract,
+        artifact_name="feature-contract dependency",
+        max_bytes=MAX_FEATURE_ARTIFACT_BYTES,
+    )
+    if replayed != contract:
+        raise TraceValidationError("feature contract changes during replay")
+
+
 def _output_state(value: os.stat_result) -> tuple[int, ...]:
     return (
         value.st_dev,
@@ -1686,17 +1703,7 @@ def _validate_artifact[T](artifact: T, expected: type[T]) -> None:
     elif expected is FeatureAvailabilityRuleCatalog:
         validate_feature_availability_rule_catalog(artifact)  # type: ignore[arg-type]
     elif expected is FeatureContract:
-        if type(artifact) is not FeatureContract:
-            raise TraceValidationError("feature contract has the wrong type")
-        raw = canonical_json(artifact)
-        replayed = parse_canonical_dataclass(
-            raw,
-            FeatureContract,
-            artifact_name="feature-contract dependency",
-            max_bytes=MAX_FEATURE_ARTIFACT_BYTES,
-        )
-        if replayed != artifact:
-            raise TraceValidationError("feature contract changes during replay")
+        validate_feature_contract(artifact)  # type: ignore[arg-type]
     else:
         raise TraceValidationError("unsupported feature artifact type")
 
@@ -1706,10 +1713,15 @@ def _write_artifact[T](
     artifact: T,
     expected: type[T],
     artifact_name: str,
+    *,
+    validator: Callable[[T], None] | None = None,
 ) -> str:
     if type(artifact) is not expected:
         raise TraceValidationError(f"{artifact_name} has the wrong type")
-    _validate_artifact(artifact, expected)
+    if validator is None:
+        _validate_artifact(artifact, expected)
+    else:
+        validator(artifact)
     raw = canonical_json(artifact)
     if not raw or len(raw) > MAX_FEATURE_ARTIFACT_BYTES:
         raise TraceValidationError(f"{artifact_name} exceeds the size limit")
@@ -1910,6 +1922,8 @@ def _load_artifact[T](
     path: Path,
     expected: type[T],
     artifact_name: str,
+    *,
+    validator: Callable[[T], None] | None = None,
 ) -> LoadedFeatureArtifact[T]:
     raw = _read_stable(path, artifact_name)
     artifact = parse_canonical_dataclass(
@@ -1918,7 +1932,10 @@ def _load_artifact[T](
         artifact_name=artifact_name,
         max_bytes=MAX_FEATURE_ARTIFACT_BYTES,
     )
-    _validate_artifact(artifact, expected)
+    if validator is None:
+        _validate_artifact(artifact, expected)
+    else:
+        validator(artifact)
     return LoadedFeatureArtifact(
         artifact=artifact,
         digest=sha256(raw).hexdigest(),

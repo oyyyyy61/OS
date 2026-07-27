@@ -335,6 +335,8 @@ provenance-only value, forbidden proxy, missing source, post-cutoff timestamp,
 or unreported dependency fails the complete view.
 The derived value ID is the canonical digest of the registry digest,
 derivation ID, ordered dependency-value IDs, typed output, and output digest.
+V1 requires selectors within one entry and expanded dependency-value IDs within
+one node to be unique; repeated weighting requires a later schema version.
 
 A `model_input_manifest.v1` binds direct observation IDs by split role,
 feature-view digests, an upstream artifact DAG, predictor, outcome catalog,
@@ -1093,16 +1095,20 @@ implementation slice is a controlled structural component; it cannot fit a
 predictor, choose a scientific support cap, inspect pilot outcomes, or claim
 calibration, policy, GPU, performance, or novelty results.
 
-The first three V4 structural slices implement deterministic candidate/split
+The first four V4 structural slices implement deterministic candidate/split
 artifacts, exhaustive finite branch support with exact schedule-case binding,
-and schema-regenerated field-path plus feature-contract artifacts. The feature
-catalog expands only legal trace payload and sidecar union variants, binds
-sequence-element identity rules, and is regenerated during validation so a
-self-consistent omission fails. The contract classifies every path exactly
-once, freezes the complete four-class profile by digest, and conserves the
-online allowlist, content-addressed availability rules, and path assignments
-exactly. The conservative v1 boundary exposes nine windowed lifecycle-prefix
-leaves and excludes future schedule data plus the post-attempt cutoff row.
-Source-byte value/time replay, a pre-attempt source for any later static cutoff
-state, finite derivations, recursive role legality, baseline parity, B1 verdict
-and envelope construction, and clean-source evidence remain open.
+schema-regenerated field-path plus feature-contract artifacts, and a finite
+typed derivation registry. The feature catalog expands only legal trace payload
+and sidecar union variants, binds sequence-element identity rules, and is
+regenerated during validation so a self-consistent omission fails. The contract
+classifies every path exactly once, freezes the complete four-class profile by
+digest, and conserves the online allowlist, content-addressed availability
+rules, and path assignments exactly. The conservative v1 boundary exposes nine
+windowed lifecycle-prefix leaves and excludes future schedule data plus the
+post-attempt cutoff row. Derivation entries use source-all or derived-one
+selectors; iterative replay reconstructs every dependency, enforces frozen
+value/edge/text ceilings, and requires one node per registry entry. Source-byte
+value/time replay, the pre-attempt lifecycle-prefix receipt, the exact
+Cartesian product of eligible events and nine rules, a pre-attempt source for
+any later static cutoff state, recursive role legality, baseline parity, B1
+verdict and envelope construction, and clean-source evidence remain open.
