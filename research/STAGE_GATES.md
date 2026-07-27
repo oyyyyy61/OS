@@ -135,13 +135,17 @@ schema/reconstruction correctness. C1-B1 split/grammar and leakage checks, B2
 pilot, B3 freeze, B4 formal coverage, C1-C policy effects, and C1-D GPU
 measurements remain open.
 
-The first C1-B1 structural implementation checkpoint now closes the code-level
-candidate-universe, cohort-token, connected-component split, temporal guard,
-predecessor-exclusion, and PILOT-to-main union-audit mechanics. The C1-B1 stage
-remains open until branch grammar, feature/provenance leakage, baseline parity,
-candidate realization, the fixed bundle, and clean-source independent replay
-all satisfy the v4 gate. This checkpoint authorizes no pilot, probability,
-policy, GPU, or performance claim.
+The first two C1-B1 structural implementation checkpoints now close the
+code-level candidate-universe, cohort-token, connected-component split,
+temporal guard, predecessor-exclusion, and PILOT-to-main union-audit mechanics,
+plus bounded finite-DNF enumeration, content-addressed assignment/outcome
+support, replayable structural abstention, source-case projection, exact
+schedule binding, and candidate-universe schedule-case conservation. The C1-B1
+stage remains open until raw source cases independently reproduce each
+projection, negative fixtures and planned-pilot no-go states are enforced, and
+feature/provenance leakage, baseline parity, candidate realization, the fixed
+bundle, and clean-source replay all satisfy the v4 gate. These checkpoints
+authorize no pilot, probability, policy, GPU, or performance claim.
 
 The clean-source acceptance launcher is
 `tools/run_m3_c1_b0_evidence.py`. It freezes 192 focused testcase identities

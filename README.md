@@ -111,10 +111,15 @@ cohort-token catalogs, seedless lineage-component role assignment, temporal
 guard checks, separate predecessor-exclusion artifacts, and a fresh
 PILOT-to-main union audit. All artifacts use canonical create-only storage with
 stable replay and fail-closed I/O classification. External catalog membership
-remains a B1 bundle-replay obligation. This is a structural component
-checkpoint. Branch grammar, feature/provenance leakage, baseline parity,
-candidate realization, the B1 bundle, and clean-source B1 acceptance evidence
-remain open; no excluded-pilot observation has been collected.
+remains a B1 bundle-replay obligation. The second slice adds a bounded finite
+DNF branch grammar, exhaustive assignment and feasible-support catalogs,
+replayable structural abstention, source-case projections, exact schedule event
+and epoch bindings, and a compact audit that conserves every distinct schedule
+case in the candidate universe. Independent replay from raw sources into those
+projections, enforcement of negative fixtures and planned-pilot no-go states,
+feature/provenance leakage, baseline parity, candidate realization, the B1
+bundle, and clean-source B1 acceptance evidence remain open; no excluded-pilot
+observation has been collected.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint
