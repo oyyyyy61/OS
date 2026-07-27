@@ -733,6 +733,14 @@ _PAYLOAD_TYPES: dict[TraceRecordType, tuple[type[Any], ...]] = {
 }
 
 
+def trace_payload_schema_variants() -> tuple[
+    tuple[TraceRecordType, tuple[type[Any], ...]], ...
+]:
+    """Return the closed record-type/payload mapping for schema reflection."""
+
+    return tuple(_PAYLOAD_TYPES.items())
+
+
 @dataclass(frozen=True, slots=True)
 class TraceRecord:
     schema_version: str

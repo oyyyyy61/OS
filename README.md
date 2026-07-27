@@ -115,11 +115,21 @@ remains a B1 bundle-replay obligation. The second slice adds a bounded finite
 DNF branch grammar, exhaustive assignment and feasible-support catalogs,
 replayable structural abstention, source-case projections, exact schedule event
 and epoch bindings, and a compact audit that conserves every distinct schedule
-case in the candidate universe. Independent replay from raw sources into those
-projections, enforcement of negative fixtures and planned-pilot no-go states,
-feature/provenance leakage, baseline parity, candidate realization, the B1
-bundle, and clean-source B1 acceptance evidence remain open; no excluded-pilot
-observation has been collected.
+case in the candidate universe. The third slice adds a schema-regenerated field
+path catalog over the exact trace, lifecycle, and schedule roots, explicit
+sequence-element identities, and an exhaustive four-way feature contract with
+a frozen classification-profile digest plus a closed, content-addressed
+availability-rule catalog. The current conservative online set contains nine
+windowed lifecycle-prefix leaves. Schedule paths remain label-side or forbidden
+for the corresponding observation, and the post-attempt cutoff trace row cannot
+source its own feature-view digest. Static cutoff-state inputs therefore remain
+closed until a separately committed pre-attempt source and receipt are
+versioned.
+Independent replay from raw sources into grammar projections and feature
+values/times, enforcement of negative fixtures and planned-pilot no-go states,
+transitive derivation and role leakage, baseline parity, candidate realization,
+the B1 bundle, and clean-source B1 acceptance evidence remain open; no
+excluded-pilot observation has been collected.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint

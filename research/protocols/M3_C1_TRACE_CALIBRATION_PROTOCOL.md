@@ -316,6 +316,17 @@ canonical value identity is the digest of schema version, contract digest,
 path, source artifact and record, element identity, typed value digest, and
 availability kind.
 
+For `feature_contract.v1`, the closed online set is limited to the nine
+windowed `LifecycleEvent` leaves named by its content-addressed availability
+rules. Every instance must belong to the exact lifecycle prefix and satisfy the
+event-time window above. Schedule events and epochs encode future demand for
+the corresponding observation and cannot be online. The cutoff trace row is
+constructed only after the feature view has been computed, so it cannot serve
+as that view's source artifact. Any later use of immutable cutoff-state leaves
+requires a separately committed pre-attempt source artifact, a closed receipt,
+and a contract version change; the final cutoff row cannot be reinterpreted as
+that source.
+
 Derived feature values name a registry entry and its ordered dependency-value
 IDs. They form an acyclic graph whose leaves are source-bound
 `ONLINE_ALLOWED` values. The verifier recursively reloads every leaf and
@@ -1081,3 +1092,17 @@ V4 closes those choices before any excluded-pilot observation exists. The next
 implementation slice is a controlled structural component; it cannot fit a
 predictor, choose a scientific support cap, inspect pilot outcomes, or claim
 calibration, policy, GPU, performance, or novelty results.
+
+The first three V4 structural slices implement deterministic candidate/split
+artifacts, exhaustive finite branch support with exact schedule-case binding,
+and schema-regenerated field-path plus feature-contract artifacts. The feature
+catalog expands only legal trace payload and sidecar union variants, binds
+sequence-element identity rules, and is regenerated during validation so a
+self-consistent omission fails. The contract classifies every path exactly
+once, freezes the complete four-class profile by digest, and conserves the
+online allowlist, content-addressed availability rules, and path assignments
+exactly. The conservative v1 boundary exposes nine windowed lifecycle-prefix
+leaves and excludes future schedule data plus the post-attempt cutoff row.
+Source-byte value/time replay, a pre-attempt source for any later static cutoff
+state, finite derivations, recursive role legality, baseline parity, B1 verdict
+and envelope construction, and clean-source evidence remain open.

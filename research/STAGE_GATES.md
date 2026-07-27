@@ -135,15 +135,21 @@ schema/reconstruction correctness. C1-B1 split/grammar and leakage checks, B2
 pilot, B3 freeze, B4 formal coverage, C1-C policy effects, and C1-D GPU
 measurements remain open.
 
-The first two C1-B1 structural implementation checkpoints now close the
+The first three C1-B1 structural implementation checkpoints now close the
 code-level candidate-universe, cohort-token, connected-component split,
 temporal guard, predecessor-exclusion, and PILOT-to-main union-audit mechanics,
 plus bounded finite-DNF enumeration, content-addressed assignment/outcome
 support, replayable structural abstention, source-case projection, exact
-schedule binding, and candidate-universe schedule-case conservation. The C1-B1
-stage remains open until raw source cases independently reproduce each
-projection, negative fixtures and planned-pilot no-go states are enforced, and
-feature/provenance leakage, baseline parity, candidate realization, the fixed
+schedule binding, candidate-universe schedule-case conservation, exact schema
+path regeneration, sequence identity rules, and exhaustive four-way feature
+classification with exact availability-rule conservation. The current online
+boundary admits nine windowed lifecycle-prefix leaves; schedule paths and the
+post-attempt cutoff trace row cannot act as current-observation inputs. A
+versioned pre-attempt source is still required before any static cutoff-state
+field can be opened. The C1-B1 stage remains open until raw source cases
+independently reproduce each grammar projection and feature value/time,
+negative fixtures and planned-pilot no-go states are enforced, and transitive
+derivation and role leakage, baseline parity, candidate realization, the fixed
 bundle, and clean-source replay all satisfy the v4 gate. These checkpoints
 authorize no pilot, probability, policy, GPU, or performance claim.
 
