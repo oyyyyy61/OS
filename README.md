@@ -82,7 +82,10 @@ C1-B trace and calibration work is governed by
 demand intent separately from resident/H2D service outcomes, freezes
 connected-component and temporal split rules, and reserves all numerical
 calibration thresholds for an excluded pilot before formal preregistration.
-The current pre-data v3 trace contract includes lifecycle-event v2, exact
+The current pre-data protocol v4 retains trace schema v3 and lifecycle-event
+v2, and closes the candidate-universe, role-assignment, finite-grammar,
+value-provenance, finite method-menu, and B1 evidence rules before any excluded
+pilot. The trace contract includes exact
 atomic batch coordinates, binding and H2D waiter transitions, block boundary
 snapshots, full transfer-history reconciliation, a sole-writer lifecycle stream
 seal, and a create-only lifecycle sidecar with independent replay. The

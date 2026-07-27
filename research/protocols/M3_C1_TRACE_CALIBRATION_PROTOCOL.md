@@ -1,4 +1,4 @@
-# M3/C1-B Trace And Calibration Protocol v3
+# M3/C1-B Trace And Calibration Protocol v4
 
 ## Material Passport
 
@@ -6,27 +6,29 @@
 - Origin mode: plan
 - Origin date: 2026-07-26
 - Pre-data amendment date: 2026-07-27
-- Verification status: `STRUCTURAL_PROTOCOL_V3_FROZEN`; numerical preregistration open
-- Version label: `m3_c1b_trace_calibration_v3`
-- Supersedes: v2 at Git commit
-  `16c6ec6929fe45bf19b7d74b75470a6b757b6111`
+- Verification status: `STRUCTURAL_PROTOCOL_V4_FROZEN`; numerical preregistration open
+- Version label: `m3_c1b_trace_calibration_v4`
+- Supersedes: v3 at Git commit
+  `3b1709d93ad383c7963ed9463d24dbdc57220fd8`
 
 The Git commit that first contains this version is its structural freeze
 identity. Numerical thresholds require a separate post-pilot preregistration.
-V3 was amended before excluded-pilot or formal C1-B data collection because
-the second implementation audit found that lifecycle-event v1 omitted atomic
-batch boundaries, binding transitions, block after-state, and exact H2D waiter
-membership. V2 remains an immutable historical protocol and cannot govern new
-traces or labels. Its schedule-sidecar contract remains unchanged and is reused
-without reinterpretation.
+V4 was amended before excluded-pilot or formal C1-B data collection because
+the post-C1-B0 implementation audit found that v3 did not close the candidate
+universe, deterministic role assignment, executable branch-grammar language,
+value-level feature provenance, B1/B2 ordering, or B1 evidence envelope. The
+accepted C1-B0 controlled observations are component fixtures and are
+permanently ineligible for `PILOT`, `TRAIN`, `CAL_FIT`, `CAL_RADIUS`, or
+`FORMAL`. V3 and earlier versions remain immutable historical protocols and
+cannot govern new B1 artifacts, pilot traces, or labels.
 
 ## Status And Claim Boundary
 
 This protocol freezes the C1-B data, label, split, calibration, and evidence
-boundary after C1-A component acceptance. It authorizes implementation and an
-excluded pilot. It does not accept C1-B, authorize a formal schedule, or
-support a probability-quality, policy-benefit, GPU, latency, throughput, or
-novelty claim.
+boundary after C1-A component acceptance. It authorizes implementation and,
+only after C1-B1 acceptance, an excluded pilot. It does not accept C1-B,
+authorize a formal schedule, or support a probability-quality, policy-benefit,
+GPU, latency, throughput, or novelty claim.
 
 C1-B must establish that a dependence-aware forecast can be constructed and
 evaluated without future information, pseudoreplication, policy-mediated
@@ -269,6 +271,102 @@ The following are never online features for the corresponding observation:
 forecast must bind the exact input observation IDs and upstream artifact
 digests.
 
+The B1 feature boundary uses closed create-only artifacts. A
+`field_path_catalog.v1` is generated from the exact recursive trace and sidecar
+schemas. A path starts with record type and payload-union variant, uses dotted
+dataclass fields, represents an optional absence as typed `ABSENT`, and uses
+`[*]` plus a frozen element-identity derivation rule for a sequence field. The
+catalog contains schema wildcard paths and rules only; runtime element
+identities occur only in `feature_view.v1`. Every schema path/union variant
+occurs exactly once. A `feature_contract.v1` binds that catalog and assigns
+every path exactly one of the four classifications above.
+
+A `derivation_registry.v1` contains a finite versioned expression language,
+not Python or caller-provided executable text. Each derivation binds one closed
+opcode, canonical parameters, ordered typed dependency slots, and output type.
+The v1 opcode set is exactly `IDENTITY`, `COUNT`, `SUM_INT`, `MIN_INT`,
+`MAX_INT`, `SUB_INT`, `BOOL_ALL`, `BOOL_ANY`, `EQUAL`, `CLAMP_INT`, and
+`RIGHT_CLOSED_BUCKET_INT`. Arithmetic uses exact unbounded integers;
+`IDENTITY` has one dependency; `COUNT` and `SUM_INT` accept zero or more;
+`MIN_INT`, `MAX_INT`, `BOOL_ALL`, and `BOOL_ANY` require one or more;
+`SUB_INT` and same-typed `EQUAL` require two; `CLAMP_INT` and bucket operations
+require one input plus their typed parameters.
+`CLAMP_INT(x, low, high)` requires `low <= high`; a right-closed bucket returns
+the first sorted edge index whose edge is at least the input, or the edge count
+when no edge matches. Empty `MIN_INT`/`MAX_INT`, implicit numeric coercion,
+floating-point input, and any unspecified arity fail closed.
+The independent verifier evaluates the same expression from source-bound leaf
+values and requires the recomputed value and digest to match. Unknown opcodes,
+ambient state, file or network reads, undeclared dependencies, type coercion,
+or a dependency-count mismatch fail closed.
+
+A `feature_view.v1` records each cutoff-visible leaf by field path, typed value
+and digest, source artifact, source record, stable element identity,
+`committed_ns`, availability kind, optional `event_ns`, and
+`lookback_start_ns`. The feature contract binds a source-schema-specific
+availability-rule ID for every online path. The verifier reads the source bytes
+and WAL/commit receipt, executes that rule, recomputes each value and timestamp,
+and requires `lookback_start_ns = cutoff_ns - feature_lookback_ns`. Both
+`IMMUTABLE_STATIC` and `WINDOWED_EVENT` values require
+`committed_ns <= cutoff_ns`; only `WINDOWED_EVENT` additionally requires
+`event_ns` in `[cutoff_ns - feature_lookback_ns, cutoff_ns]`.
+`IMMUTABLE_STATIC` values must bind the immutable version that was active at
+the cutoff and may have been committed earlier than the lookback window. The
+canonical value identity is the digest of schema version, contract digest,
+path, source artifact and record, element identity, typed value digest, and
+availability kind.
+
+Derived feature values name a registry entry and its ordered dependency-value
+IDs. They form an acyclic graph whose leaves are source-bound
+`ONLINE_ALLOWED` values. The verifier recursively reloads every leaf and
+recomputes every transform and output digest. Any transitive label,
+provenance-only value, forbidden proxy, missing source, post-cutoff timestamp,
+or unreported dependency fails the complete view.
+The derived value ID is the canonical digest of the registry digest,
+derivation ID, ordered dependency-value IDs, typed output, and output digest.
+
+A `model_input_manifest.v1` binds direct observation IDs by split role,
+feature-view digests, an upstream artifact DAG, predictor, outcome catalog,
+grouping rules, probability calibrator, primary horizon, and sample-mask
+digest for one declared consumer purpose. The direct-row matrix is exact: base
+predictor and nominal estimator consume `TRAIN`; probability calibration and
+group selection consume `CAL_FIT`; TV radius and uncertainty fallback consume
+`CAL_RADIUS`; the frozen validator directly consumes `FORMAL`. The upstream
+DAG recursively records every producer role and input artifact: a later stage
+may read frozen artifacts from earlier roles, but those artifacts cannot contain
+direct rows from an unauthorized role. `PILOT` is excluded from every later
+manifest and upstream closure. A role cannot be substituted merely because its
+rows are earlier in time. A separate append-only access journal proves that
+the formal validator reads the sealed `FORMAL` inputs exactly once; the input
+manifest alone makes no read-count claim.
+
+Every fitted or selected artifact is built in a fresh isolated process whose
+read-only input mount contains exactly the manifest-closed content-addressed
+artifacts, frozen source/import closure, and interpreter environment. A
+create-only `artifact_build_receipt.v1` records the canonical import and
+file-open closure, direct-row reads, upstream-artifact reads, command, output
+digest, and terminal. Access outside that mount, an unrecorded read, a mutable
+input, or a transcript mismatch invalidates the artifact. Formal execution
+uses the same isolation plus a create-once execution gate and append-only access
+journal.
+
+A `baseline_parity.v1` artifact contains all four aggregation modes:
+`C1_NOMINAL`, `C1_ROBUST_LOWER`, `PBKV_STYLE_ADDITIVE`, and
+`INDEPENDENT_MARGINAL_UNION`. It binds the candidate-universe digest and one
+common attempt ledger. Every candidate has exactly one ledger disposition.
+The scoreable set is exactly the candidates with `PREDICTED` and `COMPLETE`
+attempt terminals. It maps bijectively to one row in every mode; every other
+candidate has one shared typed abstained, censored, invalid, or pre-observation
+terminal. A structural fixture additionally requires at least one scoreable
+positive-demand candidate. Thus four empty or jointly cherry-picked eligible
+sets cannot pass. The exact scoreable observation IDs, feature views,
+snapshot/forecast inputs, model artifacts, horizon, and sample mask must yield
+one identical common-input digest. Only the aggregation-mode field may differ.
+The independent leakage report recomputes field coverage, source values and
+times, derivation outputs, recursive role legality, and common-input parity
+from these artifacts; it never accepts digest equality as a substitute for
+reading the bound inputs.
+
 ## Demand Reconstruction And Censoring
 
 An observed logical access binds a cutoff retention owner and a request-side
@@ -333,6 +431,75 @@ under a preregistered, label-value-blind terminal-completeness rule. They remain
 in intention-to-trace denominators, are excluded from label-required metrics,
 and can never be converted to a negative label.
 
+## Candidate Universe And B1/B2 Ordering
+
+Every B1 fixture or research campaign starts from a finite create-only
+`cutoff_plan.v1` and `candidate_universe.v1`, both sealed before any trace is
+collected. The cutoff plan enumerates every raw candidate slot and binds its
+`candidate_slot_id`, schedule case, canonical block, pre-policy cutoff-trigger
+identity, `split_time_ns`, primary horizon duration, feature lookback, and
+typed lineage. `split_time_ns` is a label-blind coordinate on a sealed
+`temporal_axis.v1`; it is distinct from the realized runtime `cutoff_ns` in the
+statistical observation tuple. The trigger identifies the frozen schedule and
+cutoff condition whose realization creates that runtime tuple.
+
+The universe purpose is exactly one of `STRUCTURAL_FIXTURE`,
+`EXCLUDED_PILOT`, or `POST_PILOT_MAIN`. It binds the complete cutoff plan,
+schedule, source, workflow-template, content-lineage, normalizer, eligibility
+rule, temporal axis, and method-menu digests. The normalizer maps each cutoff
+plan slot exactly once to an eligible candidate or a typed, label-blind
+ineligibility record. A candidate ID is the canonical digest of the schema and
+purpose, cutoff-plan digest, slot ID, schedule case, block, cutoff-trigger ID,
+split time, horizon duration, lookback, and complete typed lineage. It excludes
+`run_id`, `runtime_event_count`, realized `cutoff_ns`, labels, and service
+outcomes because those values do not exist at pre-data freeze time.
+
+For every admitted C1-B1-or-later trace, `observation_id` equals this frozen
+candidate ID. An append-only candidate-attempt journal records dispatch before
+each planned trigger and one terminal for any failure before an observation
+cutoff is committed. After capture closes, a create-only
+`candidate_realization_audit.v1` reads that journal and the sealed traces,
+reconstructs each full statistical observation tuple, and verifies that the
+declared trigger, schedule case, block, horizon, and lineage match the plan.
+Every eligible candidate must map to exactly one realized observation or one
+typed pre-observation attempt terminal; it cannot map to both. Every realized
+observation maps to exactly one eligible candidate. A missing, duplicate, or
+foreign binding, trigger mismatch, or altered block/horizon invalidates the
+complete campaign. Historical C1-B0 controlled fixture IDs remain governed by
+their accepted v3 bundle and are never upgraded into research candidates.
+
+Each plan slot therefore has exactly one disposition. An unmapped slot,
+duplicate candidate, missing or untyped lineage field, ambiguous trigger,
+post-service field, or caller-supplied runtime identity invalidates the
+complete universe. Rows cannot be added, removed, or reclassified after trace
+collection starts.
+
+C1-B1 structurally validates the finite grammar and candidate universe for the
+planned excluded pilot without reading labels or service outcomes. It also
+validates exhaustive synthetic XOR, AND, shared-latent, terminal, and no-use
+motifs. C1-B2 then checks source-case and trace conservation on the excluded
+pilot and may select only entry IDs from the B1-frozen method menu plus legal
+numerical parameters explicitly left open below. A
+pilot mismatch fails C1-B2 and cannot repair the B1 universe or grammar.
+Unknown or unbounded workload control flow remains a typed abstention. Thus no
+pilot observation contributes to B1 acceptance, and B1 cannot tune a cap,
+threshold, grammar rule, or eligibility decision from pilot outcomes.
+
+The B1 evidence bundle uses `STRUCTURAL_FIXTURE`; those rows are never research
+observations. The first real universe uses `EXCLUDED_PILOT`, assigns every
+eligible candidate to `PILOT`, and records no later-role candidate. After B2
+freezes selected menu IDs and numerical choices in a new preregistration
+commit, a new
+`POST_PILOT_MAIN` universe may contain only `TRAIN`, `CAL_FIT`, `CAL_RADIUS`,
+and `FORMAL`. It binds the exact pilot universe and split-manifest digests plus
+a separate `predecessor_exclusion_catalog.v1`. That catalog reproduces every
+pilot candidate ID and its full lineage incidence from the predecessor; these
+are historical exclusions, not rejected slots from the new cutoff plan. A
+missing, altered, or reintroduced pilot candidate or lineage invalidates the
+main universe. The role algorithm and schemas remain the B1-frozen versions,
+while B2 may choose only B1-frozen menu IDs, future interval sizes, and other
+explicitly open numerical parameters. No universe is amended in place.
+
 ## Split Components And Temporal Isolation
 
 The roles are strictly ordered:
@@ -369,16 +536,65 @@ canonical `BlockKey` is the object being studied and does not by itself create a
 statistical edge. A separate content-isolated cohort assigns each declared
 content-lineage family wholly to one role.
 
-Before trace collection, the split manifest binds complete component
-membership, interval bounds, guard gap, schedule hashes, source digests,
-template digests, and a deterministic role-assignment algorithm. A label-blind
-audit verifies the manifest before any model is fitted. Actual residence
-episodes, hits, or coalesced transfers are policy outcomes and cannot change
-membership. Any observed cross-role service dependency or undeclared source
-edge fails the entire preregistered campaign; rows cannot be merged, moved, or
-removed afterward. An immutable raw dataset file may supply disjoint cases
-across roles; its artifact digest is recorded as provenance and does not by
-itself create an edge.
+Before trace collection, the split manifest binds complete candidate component
+membership, interval bounds on the frozen split-time axis, guard gap, schedule
+hashes, source digests, template digests, and a deterministic role-assignment
+algorithm. A label-blind audit verifies the manifest before any model is
+fitted. Actual residence episodes, hits, or coalesced transfers are policy
+outcomes and cannot change membership. Any observed cross-role service
+dependency or undeclared source edge fails the entire preregistered campaign;
+rows cannot be merged, moved, or removed afterward. An immutable raw dataset
+file may supply disjoint cases across roles; its artifact digest is recorded as
+provenance and does not by itself create an edge.
+
+The v1 role-assignment algorithm is closed and seedless:
+
+1. Sort candidates by canonical candidate ID.
+2. For every lineage family, require one canonical field containing an
+   applicability tag and a sorted unique tuple of zero or more typed values.
+   `PRESENT` requires a nonempty tuple; `ABSENT` and `NOT_APPLICABLE` require an
+   empty tuple. Absence tags are audited but never create union edges. A
+   candidate may name multiple reference epochs, scheduled tool executions, or
+   other values in one family. Serialize every present value separately as one
+   canonical incidence row `(lineage_family, lineage_value,
+   sorted_member_candidate_ids)`. Union candidates that occur in the same
+   incidence row. Pairwise clique/star encodings are forbidden. A raw-dataset
+   digest, `BlockKey`, or widely shared system prefix is never a token in the
+   primary temporal cohort.
+3. Sort each component's candidate IDs and all incidence rows touching those
+   candidates. Derive the component ID from the component schema version, that
+   exact candidate list, and those exact canonical incidence rows. There is no
+   random seed, capacity balancing, or outcome-dependent tie break.
+4. Bind half-open `[start_ns, end_ns)` intervals in normative role order. A
+   structural fixture binds all five roles, an excluded-pilot universe binds
+   only `PILOT`, and a post-pilot main universe binds the four later roles. A
+   candidate's role is determined only by its frozen `split_time_ns`, which
+   must occur in exactly one interval.
+5. Every member of one connected component must resolve to the same role. A
+   component that spans intervals invalidates the complete candidate campaign.
+6. Derive `max_primary_horizon_duration_ns` and
+   `max_feature_lookback_ns` from the closed candidate universe. The gap between
+   adjacent intervals must be at least their sum. Equality is valid; a one-ns
+   deficit fails.
+
+The template-generalization cohort adds workflow-template digest as a lineage
+token. The content-isolated cohort instead adds declared content-lineage-family
+digest. Each cohort has a separate candidate universe, split manifest, and
+result; their rows cannot be pooled. Replaying a manifest recomputes every
+token, union, component ID, interval assignment, maximum, and guard gap rather
+than trusting serialized component or role fields.
+
+A `POST_PILOT_MAIN` split additionally performs one predecessor-union audit.
+The pilot and main universes must bind the same `temporal_axis.v1` digest. The
+verifier joins their full candidate and incidence catalogs, rejects every
+candidate-ID reuse and every connected component containing `PILOT` plus a
+later role, and recomputes source-case overlap. It also verifies the boundary
+from the pilot interval to the first `TRAIN` interval using the combined
+maximum horizon duration plus combined maximum feature lookback. An
+incomparable temporal axis, a one-ns gap deficit, or any shared prohibited
+lineage fails the complete main campaign before labels are read. The
+predecessor exclusion catalog is checked against this recomputed union and
+cannot substitute for it.
 
 ## Branch And Outcome Grammar
 
@@ -390,11 +606,60 @@ support.
 Every workflow template therefore binds a create-only branch grammar artifact.
 The grammar names branch variables, finite domains, XOR/AND constraints,
 shared-random-source identities, feasible path predicates, terminal/no-use
-outcomes, and the deterministic mapping from scheduled demand events to
-reference epochs. The pilot validates the grammar by exhaustive enumeration on
-synthetic motifs and source-case conservation on trace workloads. Unknown or
-unbounded control flow produces typed abstention. No observed formal path may
-expand or repair the grammar.
+outcomes, and deterministic mappings from template-local demand-site IDs to
+template-local reference-epoch-slot IDs. A separate create-only
+`grammar_instance_binding.v1` binds one schedule case to its exact assignment
+ID and outcome ID. Its active-site and active-epoch-slot domains must equal the
+outcome exactly. Active sites map bijectively to concrete scheduled-demand
+events, and active epoch slots map bijectively to concrete reference epochs;
+each active epoch has at least one mapped active site. Every other grammar site
+or epoch slot occurs once in a typed inactive list and has no concrete ID. A
+`NO_USE` binding therefore has empty active maps and complete inactive lists.
+This keeps one template grammar reusable without placing schedule-instance
+identities inside it.
+
+B1 validates the grammar by exhaustive enumeration on synthetic motifs and
+conservation of each binding's exact active domain against every pre-label
+candidate schedule; B2 separately audits source-case conservation on
+excluded-pilot traces. Unknown or unbounded control flow produces typed
+abstention. No observed pilot or formal path may expand or repair the grammar.
+
+Schema `branch_grammar.v1` is a finite truth-table language, not executable
+source text. Variables and their nonempty finite domains are sorted and unique;
+choosing one value from a variable is its XOR operation. A variable may name
+one shared-random-source identity. Each table rule is a disjunction of sorted
+clauses, each clause is a conjunction of typed terms, and each term restricts
+one variable to a nonempty subset of its domain. A clause contains at most one
+term per variable; an omitted variable is an all-domain wildcard. Term subsets
+and clauses use canonical sort order. This finite DNF supplies the AND and
+path-feasibility semantics without evaluating caller-provided code.
+
+The verifier enumerates the full Cartesian product in canonical
+variable/domain order. Every assignment must match exactly one
+`(rule_id, clause_id)` pair; overlap between two clauses of the same rule also
+fails. A rule is either `FEASIBLE`, with one frozen outcome, or `INFEASIBLE`,
+with one typed reason and no outcome. Every feasible outcome records terminal
+nodes, active template-local demand-site IDs, and a total many-to-one function
+from each active demand site to one active predeclared epoch slot. Every active
+site appears exactly once in the function domain, and every active epoch slot
+has at least one site. A feasible `NO_USE` outcome with empty site and
+epoch sets is explicit. Missing, overlapping, duplicate, or extra assignments;
+an unmapped or multiply mapped site; an unknown or empty active epoch; and an
+outcome whose terminal/site/epoch semantics change across matching assignments
+all fail closed. Assignment IDs and the derived feasible-support catalog are
+canonical digests, not caller labels.
+
+The verifier has a versioned implementation safety ceiling only to bound
+parser and enumeration resource use. It is not the scientific joint-support
+cap, which remains open for the excluded pilot. Exceeding the safety ceiling,
+unknown variables, or unbounded domains returns a typed structural abstention
+and creates no support catalog. Such abstention is an accepted negative fixture
+only. If the planned excluded-pilot universe has zero eligible candidates, or
+if any of its grammars or instance bindings lacks a complete support catalog,
+pilot readiness is `C1_B1_PLANNED_PILOT_NO_GO`, B1 stage acceptance is
+forbidden, and B2 cannot start. A formal or pilot trace may match only the
+already frozen catalog; an unseen outcome is `SUPPORT_VIOLATION`, never a new
+rule or post-hoc abstention.
 
 ## Joint Outcome And Dependence Estimation
 
@@ -514,27 +779,49 @@ Holm family-wise correction at `alpha=0.05` for secondary comparison families.
 The excluded pilot cannot change those error rates or promote a secondary
 endpoint.
 
+B1 also freezes a finite `method_menu.v1`. Each menu entry binds an
+implementation or declarative specification digest, version, permitted
+parameter names and domains, and compatible artifact schemas. The menu covers
+every nonnumeric pilot-selectable procedure: main-schedule generators,
+optional cohort definitions, epoch/time-bucket construction, grouping models,
+independence-proof rules, PPM rounding, probability calibrators, predictor
+feature-subset recipes over the already frozen `ONLINE_ALLOWED` paths and
+derivations, calibration-cell construction, pooling, sampling-confidence
+methods, OOD/abstention evaluation, go/no-go evaluation, and
+censoring/exclusion/crash/zero-retry accounting. The pilot may choose an entry
+and legal numeric parameters; it cannot introduce a new algorithm, field
+classification, derivation, dependency, or schema. B3 reruns the complete B1
+structural verifier on the selected main artifacts before any formal label is
+unsealed.
+
+Exactly one method-menu artifact and digest govern B1. The structural-fixture
+lane must exercise every menu entry with at least one declared valid fixture
+and its frozen invalid-domain cases. The planned-pilot universe, its split and
+grammar artifacts, the B2 selection, and every post-pilot main artifact must
+bind that same digest. A missing entry fixture, second menu digest, or menu
+drift produces no B1 acceptance.
+
 The excluded pilot may size instrumentation and choose the following items.
 Every selected value must be committed before a formal schedule is generated:
 
-- primary horizon duration, cutoff cadence, epoch/time buckets, feature
-  lookback, and guard gap;
-- role interval sizes, template/content-isolated cohort inclusion, and schedule
-  algorithm;
-- grouping model, independence proof rule, support cap, pseudocount, and PPM
-  rounding tie-break;
-- probability calibrator and feature contract;
-- calibration-cell definition, minimum cells/samples, pooling hierarchy,
-  radius-selection quantile, and sampling-confidence method;
-- maximum TV radius, sharpness limits, unseen-mass/OOD thresholds, and maximum
-  abstention;
-- dependent-motif minimum improvement, independent-motif equivalence margin,
-  and go/no-go rule;
-- formal component/cell count, timeout, censoring, exclusion, crash, and
-  zero-retry rules.
+- primary horizon duration, cutoff cadence, feature lookback, guard gap, and a
+  frozen-menu epoch/time-bucket entry with legal numeric boundaries;
+- role interval sizes, a frozen-menu cohort entry, and a frozen-menu schedule
+  generator entry;
+- frozen-menu grouping, independence-rule, and PPM-rounding entries, support
+  cap, and pseudocount;
+- frozen-menu probability-calibrator and predictor feature-subset entries;
+- frozen-menu calibration-cell, pooling, and sampling-confidence entries,
+  minimum cells/samples, and radius-selection quantile;
+- frozen-menu OOD/abstention evaluator, maximum TV radius, sharpness limits,
+  unseen-mass/OOD thresholds, and maximum abstention;
+- frozen-menu go/no-go evaluator, dependent-motif minimum improvement, and
+  independent-motif equivalence margin;
+- formal component/cell count, timeout, and a frozen-menu
+  censoring/exclusion/crash/zero-retry accounting entry.
 
 Apart from the inferential error rates above, no numerical success threshold is
-frozen in this v3 protocol. Selecting any listed value from `FORMAL`, reusing
+frozen in this v4 protocol. Selecting any listed value from `FORMAL`, reusing
 pilot observations, or using the same rows for `CAL_FIT` and `CAL_RADIUS`
 invalidates the C1-B formal claim.
 
@@ -545,9 +832,12 @@ invalidates the C1-B formal claim.
 | trace schema and manifest | exact schema, implementation/source hashes, closed file inventory, canonical JSONL replay |
 | lifecycle, topology, and schedule sidecars | complete event conservation, parent graph, topology digest, producer watermark, cutoff/WAL audit |
 | demand reconstruction audit | pre-policy intent binding, declared reuse epochs, resident hits, H2D-separated outcomes, censor accounting |
-| split manifest | connected components, role intervals, guard-gap audit, zero prohibited overlap |
-| feature and leakage report | field classification, common input hashes, zero future-state access |
-| branch grammar, outcome catalog, and model manifests | grammar enumeration, complete support, grouping and independence provenance, training and cal-fit IDs |
+| cutoff plan and candidate universe | complete eligible/ineligible slot normalization, candidate/observation binding, typed pre-policy lineage, closed source and schedule set |
+| split manifest | canonical lineage incidence, connected components, role intervals, predecessor-union guard audit, zero prohibited overlap |
+| feature and leakage report | complete path catalog, field classification, source-value replay, derivation registry recomputation, recursive role legality, common-input hashes |
+| branch grammar, instance bindings, outcome catalog, and model manifests | exact clause enumeration, complete support, case conservation, grouping and independence provenance, direct and upstream role IDs |
+| B1 method menu | finite implementation/specification identities and closed parameter domains for every pilot-selectable structural method |
+| B1 structural bundle | fixed inventory, independent artifact replay, protocol/verifier/implementation/environment anchors, final seal and external index |
 | TV calibration artifact | cal-radius cell counts, scores, bound terms, quantile index, upward PPM rounding |
 | baseline parity manifest | identical eligible rows and common feature-view digest for aggregation modes |
 | formal preregistration and schedule | create-only seal, frozen thresholds, ordered cases, zero retry |
@@ -568,21 +858,91 @@ invalidates the C1-B formal claim.
 
 ### C1-B1: Split And Leakage
 
+- the structural-fixture and planned excluded-pilot candidate universes
+  conserve every eligible or typed-ineligible cutoff-plan slot without
+  reading labels or service outcomes;
 - connected-component roles and temporal guard gaps replay exactly;
 - source cases have zero prohibited overlap and service outcomes never alter
   split membership;
-- branch grammar enumeration proves the frozen feasible support or abstains;
-- feature availability has zero future-state or label leakage;
-- every aggregation baseline has the same common input digest.
+- finite truth-table branch grammar enumeration and instance binding prove the
+  planned pilot's frozen feasible support; typed structural abstention is legal
+  only for declared negative fixtures;
+- feature field coverage, value availability, derivation lineage, and role use
+  have zero future-state or label leakage;
+- every aggregation baseline has the same common input digest;
+- a clean committed CPU-only bundle independently replays all B1 artifacts and
+  publishes an external final-seal index with status `C1_B1_STAGE_ACCEPTED`.
+
+The B1 verdict envelope has three orthogonal closed fields. `component_status`
+is `C1_B1_SPLIT_GRAMMAR_LEAKAGE_COMPONENT_VERIFIED` or
+`C1_B1_COMPONENT_FAILED`; `pilot_readiness` is
+`C1_B1_PLANNED_PILOT_READY`, `C1_B1_PLANNED_PILOT_NO_GO`, or
+`C1_B1_PLANNED_PILOT_NOT_EVALUATED`; and `stage_status` is
+`C1_B1_STAGE_ACCEPTED` or `C1_B1_STAGE_NOT_ACCEPTED`. The transition table is
+exact:
+
+| Fixture component | Planned pilot | Stage | Publication |
+| --- | --- | --- | --- |
+| failed | not evaluated | not accepted | no index; failed attempt root is never resumed |
+| verified | zero eligible candidate or typed grammar/support no-go | not accepted | sealed no-go diagnostic index after both replays |
+| verified | ready with complete support and both replays passed | accepted | accepted stage index |
+
+Every other combination fails envelope parsing. A no-go is a valid negative
+readiness verdict, not a component failure or stage acceptance. Its tracked
+index is `evidence/m3/c1/M3_C1_B1_NO_GO_EVIDENCE_INDEX.json`; it binds the
+sealed external root and exact typed no-go reasons but cannot authorize B2. The
+accepted tracked index is
+`evidence/m3/c1/M3_C1_B1_STAGE_EVIDENCE_INDEX.json`.
+
+The fixed B1 inventory contains
+all bytes required for reconstruction. The structural-fixture lane includes
+raw source cases, sealed schedules, cutoff plans, normalizer and eligibility
+rules, temporal axis, candidate universes, split manifests, grammars and
+instance bindings, derived catalogs, trace and lifecycle bytes,
+candidate-realization audit, candidate attempt journal, source commit and
+availability receipts, field-path catalog, feature contract, availability
+rules, derivation registry, feature views, model-input and artifact-build
+receipts, baseline-parity manifests, common attempt ledger, access journal, and
+the shared method-menu entry fixtures. The planned-pilot lane includes
+the corresponding raw source/schedule bytes, cutoff plan, normalizer and
+eligibility-rule bytes, universe, split manifest, grammars and instance
+bindings, field-path catalog, feature contract, availability-rule bytes,
+derivation registry, and the same method-menu digest; it contains no pilot
+feature view, fitted model, baseline result, label, or service outcome. The
+shared method-menu bytes occur once in the sealed inventory and both lane
+manifests bind them. Audit reports are derived outputs and cannot replace these
+inputs.
+
+A one-shot attempt marker binds the initial hashes; a manifest and final seal
+bind the closed inventory. The production launcher must run from clean
+committed `main`, freeze exact focused and full testcase identities, and record
+their zero-failure/zero-skip terminals plus Ruff and compile results. It
+computes Git HEAD/tree/branch/clean status and protocol, verifier,
+implementation, environment, and imported-module anchors outside the inner
+producer, reads the final seal independently, and runs a fresh validator
+process. The outer schema freezes the canonical sorted anchor-path set, Git
+blob lookup rule, transitive import closure, external-index schema, and
+create-only publication order. This establishes fresh-process,
+state-independent replay with one frozen verifier implementation; it makes no
+claim of algorithmic independence unless a separately anchored second verifier
+also reproduces the verdict.
+Only after both replays succeed may a tracked external index publish
+`C1_B1_STAGE_ACCEPTED` or the scoped no-go verdict under the transition table.
+Every B2-B4, policy, GPU, and performance gate remains open. An indeterminate
+or failed attempt publishes neither index and its root is never resumed.
 
 ### C1-B2: Excluded Pilot
 
 - pilot observations are complete and permanently excluded;
 - instrumentation loss, censoring, unknown support, and abstention are reported;
-- pilot-selected thresholds are frozen in a new preregistration commit.
+- every pilot-selected B1 menu-entry ID and legal numerical parameter is frozen
+  in a new preregistration commit.
 
 ### C1-B3: Calibration Freeze
 
+- the selected main universe, predecessor-union audit, split, grammar,
+  feature subset, and method-menu identities pass the complete B1 structural
+  verifier again before formal labels are available;
 - train, cal-fit, and cal-radius inputs are disjoint and complete;
 - support, grouping, probability calibration, cell rules, and TV radius are
   create-only and independently replayed;
@@ -607,14 +967,15 @@ rule passes.
 - Language/framework: Python 3.12 standard library plus the existing test
   environment; no GPU dependency for C1-B0/B1.
 - Working directory: `/home/data/25_oyzx/cagent-work/dagkv`.
-- First implementation: `src/dagkv/c1_trace.py` with strict identity models,
-  canonical serialization, branch grammar, ledger-bound demand reconstruction,
-  schedule watermarks, and split validation; plus an orchestrator-held cutoff
-  commit hook and a pre-service adapter commit gate.
-- First tests: `tests/test_c1_trace.py` covering round-trip, parent/state
-  closure, pre-policy intent ordering, resident hit, H2D failure separation,
-  fanout coalescing, censoring, split overlap, cutoff leakage, and baseline
-  parity.
+- V4 B1 implementation: `src/dagkv/c1_split.py`,
+  `src/dagkv/c1_grammar.py`, `src/dagkv/c1_features.py`, and
+  `src/dagkv/c1_b1.py` with closed canonical artifacts and independent replay;
+  no predictor fitting or serving-policy mutation.
+- B1 tests: candidate conservation, transitive components, role boundaries,
+  guard gaps, service-outcome invariance, finite grammar truth tables,
+  terminal/no-use and epoch conservation, field coverage, value-level cutoff
+  availability, transitive derivation leakage, role isolation, baseline parity,
+  create-only storage, tamper rejection, and fresh-process bundle replay.
 - Initial success criterion: all C1-B0/B1 component tests plus the complete
   repository regression pass; no probability or performance claim.
 - Pilot entry command and runtime root remain open until C1-B0/B1 evidence is
@@ -702,3 +1063,21 @@ fresh bundle from the clean committed implementation and an external evidence
 index. Branch grammar and split/leakage remain C1-B1 gates; no excluded pilot,
 calibration artifact, formal probability result, GPU result, or performance
 claim has been produced.
+
+### Fifth Pre-Data Checkpoint: B0 Acceptance And B1 Closure
+
+After the historical fourth-slice checkpoint, the clean-source C1-B0 launcher
+published a sealed CPU-only artifact from commit
+`158eab9ef5b9a75e5677281fbdf22f32dd82547e`. Its exact 192-case focused set,
+575-case repository regression, source and environment anchors, inner final
+seal, and independent outer replay are indexed in
+`evidence/m3/c1/M3_C1_B0_STAGE_EVIDENCE_INDEX.json`. This closes C1-B0 for
+schema/reconstruction correctness only.
+
+The subsequent pre-data B1 audit found the v3 structural descriptions
+insufficient to reconstruct a unique candidate universe, role assignment,
+branch predicate evaluator, value-level leakage proof, or evidence envelope.
+V4 closes those choices before any excluded-pilot observation exists. The next
+implementation slice is a controlled structural component; it cannot fit a
+predictor, choose a scientific support cap, inspect pilot outcomes, or claim
+calibration, policy, GPU, performance, or novelty results.

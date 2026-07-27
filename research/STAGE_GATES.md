@@ -113,12 +113,16 @@ C1-C paired policy replay, and C1-D real-GPU gates remain open. No C1
 performance or novelty claim is authorized.
 
 C1-B now follows the structurally frozen data boundary in
-`research/protocols/M3_C1_TRACE_CALIBRATION_PROTOCOL.md`: the probability label
-comes from pre-policy demand intents under a frozen exogenous schedule, split
-roles are connected components ordered as pilot/train/cal-fit/cal-radius/formal,
+`research/protocols/M3_C1_TRACE_CALIBRATION_PROTOCOL.md` v4: the probability
+label comes from pre-policy demand intents under a frozen exogenous schedule,
+split roles are connected components ordered as
+pilot/train/cal-fit/cal-radius/formal,
 actual H2D is reserved for later policy evaluation, and every numerical
 success threshold apart from the frozen inferential error rates remains open
-until an excluded pilot is complete.
+until an excluded pilot is complete. V4 also freezes the pre-label cutoff plan
+and candidate universe, seedless split-time role assignment, finite truth-table
+grammar with schedule-case binding, recomputable value provenance, finite
+method menu, and B1 evidence envelope.
 
 The C1-B0 operation-typed committer, formal runtime barrier, and controlled-
 replay segmented bundle are implemented and pass focused component replay and
