@@ -102,6 +102,14 @@ implements those checks; its status and open-gate list prevent it from closing
 later calibration or performance gates. The live auditor reconciles those
 projections against the runtime, and any exception while applying an already
 committed transition poisons the writer and prevents later mutation or sealing.
+The C1-B0 stage launcher additionally binds a clean Git tree, protocol and
+dependency blobs, the lexical virtual-environment launcher, installed
+distribution inventory, and the resolved path plus byte hash of every imported
+runtime/verifier module. A child process produces the sealed inner bundle; the
+parent independently reads its final seal and a second child replays it before
+create-only outer publication. Exact focused and full JUnit identity digests
+prevent test substitution. This stage path is CPU-only and keeps every C1-B1+
+and performance gate open.
 The accepted M2 result remains bound to its frozen v1 artifacts; the pre-data
 v2 extension does not rewrite or broaden that historical acceptance.
 

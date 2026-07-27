@@ -129,6 +129,14 @@ index published only after successful finalization remain required. C1-B1
 split/grammar and leakage checks, B2 pilot, B3 freeze, B4 formal coverage,
 C1-C policy effects, and C1-D GPU measurements remain open.
 
+The clean-source acceptance launcher is
+`tools/run_m3_c1_b0_evidence.py`. It freezes 192 focused testcase identities
+and all 575 repository testcase identities, runs the inner producer and
+validator in separate processes, binds imported module bytes to the recorded
+Git blobs, and publishes a create-only CPU artifact outside the repository.
+Landing the launcher alone leaves the gate open; the tracked external index is
+the final C1-B0 acceptance record.
+
 M3 must additionally implement an explicitly derived capacity/DMA-constrained
 joint controller (C2) and deadline-aware partial-prefix single-flight (C3).
 Each mechanism requires an independent switch, matched first-order baselines,

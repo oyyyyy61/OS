@@ -90,6 +90,12 @@ concurrency, and fresh-process replay tests. Their serialized status is limited
 to `C1_B0_SCHEMA_RECONSTRUCTION_COMPONENT_VERIFIED`. C1-B0 stage acceptance
 still requires a bundle produced from a clean committed source snapshot and an
 independently published external anchor; C1-B1 through C1-B4 remain open.
+`tools/run_m3_c1_b0_evidence.py` is the CPU-only clean-source launcher for that
+gate. It freezes the exact 192-case focused set and 575-case repository set,
+binds Git blobs, the protocol, the virtual environment, installed
+distributions, and imported module origins, and generates plus replays the
+inner bundle in separate processes. The launcher publishes only outside the
+repository and does not authorize B1 calibration or any GPU/performance claim.
 
 This correctness work remains substrate for the narrowed research mainline:
 dependence-aware shared leases (C1), an explicitly constrained joint
@@ -120,6 +126,19 @@ uv sync --frozen
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format --check .
 ```
+
+After committing the launcher source, create the C1-B0 stage artifact from a
+clean `main` checkout:
+
+```bash
+.venv/bin/python -m tools.run_m3_c1_b0_evidence run \
+  --output-dir /home/data/25_oyzx/dagkv_runtime/m3_c1_b0_stage_evidence_v1_20260727_run01 \
+  --python .venv/bin/python
+```
+
+Record the published manifest, checksum, final-seal, source-commit, and
+publication-lock identities in a tracked evidence index only after the fresh
+outer replay passes.
 
 After committing a clean C1-A source snapshot, create its CPU-only evidence
 bundle with the frozen M2 acceptance identity:
