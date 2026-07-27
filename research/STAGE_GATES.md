@@ -84,8 +84,8 @@ tolerance contributes to this item-8 or aggregate decision.
 
 ## M3: Policy Mechanisms
 
-Status: **C1_A_COMPONENT_ACCEPTED**. C1-B, C1-C, and C1-D remain open. C2 and
-C3 have not started.
+Status: **C1_B0_STAGE_ACCEPTED**. C1-B1 through C1-B4, C1-C, and C1-D remain
+open. C2 and C3 have not started.
 
 The normative C1 boundary and later experiment gates are frozen in
 `research/protocols/M3_C1_SHARED_LEASE_PROTOCOL.md`. The current component:
@@ -122,20 +122,23 @@ until an excluded pilot is complete.
 
 The C1-B0 operation-typed committer, formal runtime barrier, and controlled-
 replay segmented bundle are implemented and pass focused component replay and
-fault tests. This is `C1_B0_SCHEMA_RECONSTRUCTION_COMPONENT_VERIFIED`, not C1-B0
-stage acceptance. A clean committed source identity, independently computed
-protocol/verifier/implementation/environment anchors, and an external evidence
-index published only after successful finalization remain required. C1-B1
-split/grammar and leakage checks, B2 pilot, B3 freeze, B4 formal coverage,
-C1-C policy effects, and C1-D GPU measurements remain open.
+fault tests. The clean-source outer gate additionally passed the exact 192-case
+focused set, exact 575-case repository set, Ruff checks, child-process bundle
+production, stable final-seal readback, and independent inner plus outer
+replay. Its source commit and immutable external identities are frozen in
+`evidence/m3/c1/M3_C1_B0_STAGE_EVIDENCE_INDEX.json`. This accepts C1-B0
+schema/reconstruction correctness. C1-B1 split/grammar and leakage checks, B2
+pilot, B3 freeze, B4 formal coverage, C1-C policy effects, and C1-D GPU
+measurements remain open.
 
 The clean-source acceptance launcher is
 `tools/run_m3_c1_b0_evidence.py`. It freezes 192 focused testcase identities
 and all 575 repository testcase identities, runs the inner producer and
 validator in separate processes, binds imported module bytes to the recorded
 Git blobs, and publishes a create-only CPU artifact outside the repository.
-Landing the launcher alone leaves the gate open; the tracked external index is
-the final C1-B0 acceptance record.
+The tracked external index is the final C1-B0 acceptance record. Its open-gate
+list prevents that record from authorizing B1 calibration or any policy/GPU
+claim.
 
 M3 must additionally implement an explicitly derived capacity/DMA-constrained
 joint controller (C2) and deadline-aware partial-prefix single-flight (C3).

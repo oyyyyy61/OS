@@ -110,6 +110,9 @@ parent independently reads its final seal and a second child replays it before
 create-only outer publication. Exact focused and full JUnit identity digests
 prevent test substitution. This stage path is CPU-only and keeps every C1-B1+
 and performance gate open.
+The accepted source and external artifact identities are frozen in
+`evidence/m3/c1/M3_C1_B0_STAGE_EVIDENCE_INDEX.json`; the inner component status
+remains narrower than the outer `C1_B0_STAGE_ACCEPTED` gate.
 The accepted M2 result remains bound to its frozen v1 artifacts; the pre-data
 v2 extension does not rewrite or broaden that historical acceptance.
 

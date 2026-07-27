@@ -1,0 +1,125 @@
+{
+  "schema_version": "dagkv.m3.c1_b0_stage_evidence_index.v1",
+  "recorded_at_utc": "2026-07-27T01:16:12Z",
+  "gate_status": "C1_B0_STAGE_ACCEPTED",
+  "m3_status": "M3_C1_IN_PROGRESS",
+  "claim_scope": "C1-B0 schema, durable operation ordering, lifecycle/schedule closure, and demand-label reconstruction only. No branch-grammar completeness, leakage, calibration, policy benefit, latency, throughput, GPU, or novelty claim.",
+  "published_bundle": {
+    "root": "/home/data/25_oyzx/dagkv_runtime/m3_c1_b0_stage_evidence_v1_20260727_run01",
+    "artifact_series": "v1",
+    "manifest_schema_version": "dagkv.m3.c1_b0_stage_evidence.v1",
+    "manifest_file": "M3_C1_B0_STAGE_EVIDENCE.json",
+    "manifest_sha256": "9ca33abde497eebe3f0b38e52ecae1e3e8c5a61123b3b4bb374cc091b7a4f505",
+    "manifest_bytes": 95545,
+    "checksums_file": "SHA256SUMS",
+    "checksums_sha256": "36213f1b8de2488665d95a0a4f5cb97c90b8cf403e58f4ca94147cc2c48435e9",
+    "checksums_bytes": 2425,
+    "repository_head": "158eab9ef5b9a75e5677281fbdf22f32dd82547e",
+    "repository_tree": "755cb0117a6b7edb46c31045406a2ab9a0323f64",
+    "created_at_utc": "2026-07-27T01:14:28.189966+00:00",
+    "status": "C1_B0_STAGE_EVIDENCE_VERIFIED",
+    "accepted_gate_status": "C1_B0_STAGE_ACCEPTED",
+    "focused_test_count": 192,
+    "focused_identity_sha256": "2f224769a23cdec169de0a903cc08011e2c841758dab5dd3478cf388ee3a1f49",
+    "full_repository_test_count": 575,
+    "full_identity_sha256": "3375e800db068c510a777cbc1f4d0de247eaa5a9a40fba56e243ac0ae212a528",
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "ruff_check_passed": true,
+    "ruff_format_check_passed": true,
+    "inner_producer_passed": true,
+    "fresh_inner_replay_passed": true,
+    "root_mode": "0555",
+    "file_mode": "0444",
+    "manifest_hard_link_count": 1,
+    "checksums_hard_link_count": 1
+  },
+  "inner_bundle": {
+    "bundle_id": "c1-b0-controlled-stage-bundle",
+    "component_status": "C1_B0_SCHEMA_RECONSTRUCTION_COMPONENT_VERIFIED",
+    "manifest_file": "bundle/C1_B0_MANIFEST.json",
+    "manifest_sha256": "8a8a724153219a84c546a9d48b99d5b3374a42fb864a8d097edb8457bf28a678",
+    "manifest_bytes": 2470,
+    "final_seal_file": "bundle/C1_B0_FINAL_SEAL.json",
+    "final_seal_sha256": "cff5082ee8796e5320bbe526a02c4a64f1b7c6817e953822fbe0ae697469d2ab",
+    "final_seal_bytes": 1550,
+    "manifest_hard_link_count": 1,
+    "final_seal_hard_link_count": 1,
+    "schedule_sha256": "90efaa049feb0f01c20813a3167d1acad30df0717b28bf8ccc43d24f1974c3f6",
+    "lifecycle_sha256": "3783331cac4f4215a77b3e5d6102dacf2cb467d2478d459c03a250529a1f8b1f",
+    "trace_sha256": "baa75d832dbb56dafe3c28342bad487614b97f769f6c45e8ddd5cc628e9734f4",
+    "verified_observation_ids": [
+      "observation-abstained-no-demand",
+      "observation-predicted-resident"
+    ],
+    "demand_labels": [
+      {
+        "observation_id": "observation-abstained-no-demand",
+        "first_demand": 0,
+        "epoch_count": 0,
+        "repeat_count": 0
+      },
+      {
+        "observation_id": "observation-predicted-resident",
+        "first_demand": 1,
+        "epoch_count": 1,
+        "repeat_count": 0
+      }
+    ]
+  },
+  "external_anchors": {
+    "protocol_path": "research/protocols/M3_C1_TRACE_CALIBRATION_PROTOCOL.md",
+    "protocol_sha256": "3f6308c5a2c3c6c5e0946cb7b990dc9cd5706d892951f904f0ce1c2c9eced18e",
+    "implementation_digest": "f1e8a66de87b9da2d69f66625f084e2a71b80fb43973bf405a9a0d0232011338",
+    "verifier_digest": "6eae3a74f2770070bfa03a1b1ee5fad4b58f79f656c4ee805a8f72dfdfe70288",
+    "environment_digest": "76153a9c6f2bca386d9749747f3be2fae7f73e4d0b2509add111e54e45d5cb42",
+    "module_origins_digest": "4f7bcc75c5a4543221304241f376bb3c270ca9a95f7e857e2cccb827f5f3027a"
+  },
+  "python_binding": {
+    "launcher": "/home/data/25_oyzx/cagent-work/dagkv/.venv/bin/python",
+    "runtime_version": "Python 3.12.13",
+    "resolved_executable_sha256": "8392ec78d090ab7e1b1c058cff454de64a0780e263e6a9e66cdb1256be322fb0",
+    "pyvenv_cfg_sha256": "b394678e28ef508063d6d0c4fd0b872607e3a3bf251cdeb6e750e3a3f8a0585b",
+    "virtual_environment_bound": true
+  },
+  "controlled_scenario": {
+    "scenario_id": "c1-b0-resident-and-abstention",
+    "clock_domain": "campaign_monotonic_ns",
+    "cutoff_ns": 5,
+    "abstained_deadline_ns": 7,
+    "scheduled_access_ns": 8,
+    "predicted_deadline_ns": 15,
+    "schedule_closed_through_ns": 16,
+    "branch_grammar_complete": false,
+    "b1_leakage_accepted": false,
+    "b1_role_assignment_accepted": false
+  },
+  "publication_lock": {
+    "path": "/home/data/25_oyzx/dagkv_runtime/.m3_c1_b0_stage_evidence_v1_20260727_run01.m3-c1-b0-publication.lock",
+    "state": "PUBLISHED",
+    "sha256": "07d97d714b6b8c6a4b7956ba0509850a3e70e576fbf1b33a8a8291390053907e",
+    "bytes": 10,
+    "mode": "0444",
+    "hard_link_count": 1
+  },
+  "independent_outer_replay": {
+    "validated_at_utc": "2026-07-27T01:16:12Z",
+    "passed": true,
+    "validator_repository_path": "tools/run_m3_c1_b0_evidence.py",
+    "expected_manifest_sha256": "9ca33abde497eebe3f0b38e52ecae1e3e8c5a61123b3b4bb374cc091b7a4f505",
+    "expected_checksums_sha256": "36213f1b8de2488665d95a0a4f5cb97c90b8cf403e58f4ca94147cc2c48435e9"
+  },
+  "open_gates": [
+    "C1_B1_SPLIT_LEAKAGE",
+    "C1_B2_EXCLUDED_PILOT",
+    "C1_B3_CALIBRATION_FREEZE",
+    "C1_B4_FORMAL_COVERAGE",
+    "C1_C_POLICY_EFFECT",
+    "C1_D_REAL_GPU"
+  ],
+  "gpu_used": false,
+  "performance_claims_supported": false,
+  "novelty_claims_supported": false,
+  "next_action": "Implement and freeze the C1-B1 connected-component split, branch-grammar completeness, role assignment, and feature-leakage audit before any excluded pilot."
+}

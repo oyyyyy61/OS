@@ -20,7 +20,9 @@ the v3 evidence protocol. The accepted scope is one process, one RTX 4090, and
 GPU plus primary CPU-DRAM with shared-owner isolation, idempotent release,
 generation safety, transfer integrity, no use-after-free, and output
 correctness. Latency, throughput, hit-rate, scheduling-policy, novelty, C1, C2,
-C3, and paper-performance claims remain open for M3-M6.
+C3, and paper-performance claims remain open for M3-M6. C1-B0 is accepted for
+its CPU-only schema/reconstruction scope; C1-B1 and every later C1 gate remain
+open.
 
 The clean runtime now contains the canonical schema, transactional lifecycle
 ledger, DAG node gate, generation-safe transfer reservations, shared-owner
@@ -86,10 +88,13 @@ snapshots, full transfer-history reconciliation, a sole-writer lifecycle stream
 seal, and a create-only lifecycle sidecar with independent replay. The
 operation-typed durable committer, formal runtime endpoints, and segmented
 create-only C1-B0 bundle are now implemented with focused fault, tamper,
-concurrency, and fresh-process replay tests. Their serialized status is limited
-to `C1_B0_SCHEMA_RECONSTRUCTION_COMPONENT_VERIFIED`. C1-B0 stage acceptance
-still requires a bundle produced from a clean committed source snapshot and an
-independently published external anchor; C1-B1 through C1-B4 remain open.
+concurrency, and fresh-process replay tests. The inner bundle retains the scoped
+status `C1_B0_SCHEMA_RECONSTRUCTION_COMPONENT_VERIFIED`. Its clean-source outer
+bundle passed 192 focused cases, the exact 575-case repository regression,
+Ruff, child-process production, and independent inner plus outer replay. The
+accepted source and immutable external identities are recorded in
+`evidence/m3/c1/M3_C1_B0_STAGE_EVIDENCE_INDEX.json`. C1-B0 is accepted only for
+schema/reconstruction correctness; C1-B1 through C1-B4 remain open.
 `tools/run_m3_c1_b0_evidence.py` is the CPU-only clean-source launcher for that
 gate. It freezes the exact 192-case focused set and 575-case repository set,
 binds Git blobs, the protocol, the virtual environment, installed
@@ -138,7 +143,9 @@ clean `main` checkout:
 
 Record the published manifest, checksum, final-seal, source-commit, and
 publication-lock identities in a tracked evidence index only after the fresh
-outer replay passes.
+outer replay passes. The accepted run01 identities are frozen in
+`evidence/m3/c1/M3_C1_B0_STAGE_EVIDENCE_INDEX.json`; create a new artifact
+series for any future protocol amendment instead of overwriting run01.
 
 After committing a clean C1-A source snapshot, create its CPU-only evidence
 bundle with the frozen M2 acceptance identity:
